@@ -1,9 +1,5 @@
 .vscode
 
-data
-logs
-results
-
 **__pycache__
 
 **.ipynb_checkpoints
