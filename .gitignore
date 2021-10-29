@@ -1,5 +1,8 @@
 .vscode
 
+data
+logs
+results
 
 **__pycache__
 
