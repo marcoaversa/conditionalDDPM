@@ -487,10 +487,10 @@ class Trainer(object):
     def __init__(
         self,
         diffusion_model,
-        folder,
+        train_loader,
+        valid_loader,
         *,
         ema_decay = 0.995,
-        image_size = 128,
         train_batch_size = 32,
         train_lr = 2e-5,
         train_num_steps = 100000,
@@ -509,14 +509,15 @@ class Trainer(object):
 
         self.step_start_ema = step_start_ema
         self.save_and_sample_every = save_and_sample_every
+        self.save_loss_every = 50
 
         self.batch_size = train_batch_size
         self.image_size = diffusion_model.image_size
         self.gradient_accumulate_every = gradient_accumulate_every
         self.train_num_steps = train_num_steps
 
-        self.ds = Dataset(folder, image_size)
-        self.dl = cycle(data.DataLoader(self.ds, batch_size = train_batch_size, shuffle=True, pin_memory=True))
+        self.train_loader = train_loader
+        self.valid_loader = valid_loader
         self.opt = Adam(diffusion_model.parameters(), lr=train_lr)
 
         self.step = 0
@@ -541,11 +542,12 @@ class Trainer(object):
             return
         self.ema.update_model_average(self.ema_model, self.model)
 
-    def save(self, milestone):
+    def save(self, milestone, loss):
         data = {
             'step': self.step,
             'model': self.model.state_dict(),
-            'ema': self.ema_model.state_dict()
+            'ema': self.ema_model.state_dict(),
+            'loss': loss,
         }
         torch.save(data, str(self.results_folder / f'model-{milestone}.pt'))
 
@@ -559,28 +561,41 @@ class Trainer(object):
     def train(self):
         backwards = partial(loss_backwards, self.fp16)
 
+        avg_loss = [0,]
+
         while self.step < self.train_num_steps:
-            for i in range(self.gradient_accumulate_every):
-                data = next(self.dl).cuda()
-                loss = self.model(data)
-                print(f'{self.step}: {loss.item()}')
+                                
+            # for i in range(self.gradient_accumulate_every):
+            #     imgs, labels = next(iter(self.train_loader))
+            #     loss = self.model(imgs.cuda())
+            #     print(f'{self.step}: {loss.item()}')
+            #     backwards(loss / self.gradient_accumulate_every, self.opt)
+
+            for imgs, labels in self.train_loader:
+                loss = self.model(imgs.cuda())
                 backwards(loss / self.gradient_accumulate_every, self.opt)
+                if self.step != 0 and self.step % self.save_loss_every == 0:
+                    avg_loss[-1] /= self.save_loss_every
+                    print(f'Step: {self.step} - Loss: {avg_loss[-1]:.3f}')
+                    avg_loss.append(0)
 
-            self.opt.step()
-            self.opt.zero_grad()
+                avg_loss[-1] += loss.item()
 
-            if self.step % self.update_ema_every == 0:
-                self.step_ema()
+                self.opt.step()
+                self.opt.zero_grad()
 
-            if self.step != 0 and self.step % self.save_and_sample_every == 0:
-                milestone = self.step // self.save_and_sample_every
-                batches = num_to_groups(36, self.batch_size)
-                all_images_list = list(map(lambda n: self.ema_model.sample(batch_size=n), batches))
-                all_images = torch.cat(all_images_list, dim=0)
-                all_images = (all_images + 1) * 0.5
-                utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow = 6)
-                self.save(milestone)
+                if self.step % self.update_ema_every == 0:
+                    self.step_ema()
 
-            self.step += 1
+                if self.step != 0 and self.step % self.save_and_sample_every == 0:
+                    milestone = self.step // self.save_and_sample_every
+                    batches = num_to_groups(36, self.batch_size)
+                    all_images_list = list(map(lambda n: self.ema_model.sample(batch_size=n), batches))
+                    all_images = torch.cat(all_images_list, dim=0)
+                    all_images = (all_images + 1) * 0.5
+                    utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow = 6)
+                    self.save(milestone, avg_loss)
+
+                self.step += 1
 
         print('training completed')
