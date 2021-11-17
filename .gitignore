@@ -3,6 +3,7 @@
 data
 logs
 results
+templates
 
 nohup.out
 
