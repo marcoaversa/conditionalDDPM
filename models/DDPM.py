@@ -392,20 +392,19 @@ class GaussianDiffusion(nn.Module):
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
     def p_mean_variance(self, x, t, clip_denoised: bool):
-        print(x.device, self.denoise_fn(x,t).device)
-        x_recon = self.predict_start_from_noise(x, t=t, noise=self.denoise_fn(x, t))
+        x_recon = self.predict_start_from_noise(x[:,:self.channels], t=t, noise=self.denoise_fn(x, t))
 
         if clip_denoised:
             x_recon.clamp_(-1., 1.)
 
-        model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start=x_recon, x_t=x, t=t)
+        model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start=x_recon, x_t=x[:,:self.channels], t=t)
         return model_mean, posterior_variance, posterior_log_variance
 
     @torch.no_grad()
     def p_sample(self, x, t, clip_denoised=True, repeat_noise=False):
         b, *_ = x.shape
         model_mean, _, model_log_variance = self.p_mean_variance(x=x, t=t, clip_denoised=clip_denoised)
-        noise = noise_like(x.shape, self.device, repeat_noise)
+        noise = noise_like(x[:,:self.channels].shape, self.device, repeat_noise)
         # no noise when t == 0
         nonzero_mask = (1 - (t == 0).float()).reshape(b, *((1,) * (len(x.shape) - 1)))
         return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
@@ -414,13 +413,12 @@ class GaussianDiffusion(nn.Module):
     def p_sample_loop(self, y, shape):
         b,_,h,w = shape
         img = torch.randn(shape, device=self.device)
-
         for i in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
             if self.mode == 'conditional':
                 if y.shape != (b,1,h,w):
                     y = self.label_reshaping(y, b, h, w, self.device)
                 img = self.label_concatenate(img,y)
-            img = self.p_sample(img, torch.full((b,), i, dtype=torch.long))
+            img = self.p_sample(img, torch.full((b,), i, dtype=torch.long, device=self.device))            
         return img
 
     @torch.no_grad()
@@ -571,14 +569,26 @@ class Trainer(object):
             return
         self.ema.update_model_average(self.ema_model, self.model)
 
-    def save(self, milestone, loss):
+    def save(self, milestone, loss, y):
         data = {
             'step': self.step,
             'model': self.model.state_dict(),
             'ema': self.ema_model.state_dict(),
             'loss': loss,
         }
-        torch.save(data, str(self.results_folder / f'model-{milestone}.pt'))
+        # torch.save(data, str(self.results_folder / f'model-{milestone}.pt'))
+        torch.save(data, str(self.results_folder / f'model.pt'))
+        with open(str(self.results_folder / f'loss.txt'), 'w') as file:
+            for element in loss:
+                file.write(str(element) + "\n")
+        if self.model_type == 'conditional':
+            writing_mode = 'w' if milestone == 1 else 'a+'
+            with open(str(self.results_folder / f'labels.txt'), writing_mode) as file:
+                file.write(f"sample-{milestone}: ")
+                for element in y:
+                    file.write(str(element.item()) + " ")
+                file.write("\n")
+
 
     def load(self, milestone):
         data = torch.load(str(self.results_folder / f'model-{milestone}.pt'))
@@ -617,12 +627,13 @@ class Trainer(object):
 
                 if self.step != 0 and self.step % self.save_and_sample_every == 0:
                     milestone = self.step // self.save_and_sample_every
-                    batches = num_to_groups(36, self.batch_size)
-                    all_images_list = list(map(lambda n: self.ema_model.sample(y, batch_size=n), batches))
+                    n_images_to_sample = 25 
+                    batches = num_to_groups(n_images_to_sample, self.batch_size) 
+                    all_images_list = list(map(lambda n: self.ema_model.sample(y[:n], batch_size=n), batches))
                     all_images = torch.cat(all_images_list, dim=0)
                     all_images = (all_images + 1) * 0.5
-                    utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow = 6)
-                    self.save(milestone, avg_loss)
+                    utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow = 5)
+                    self.save(milestone, avg_loss, y)
 
                 self.step += 1
 

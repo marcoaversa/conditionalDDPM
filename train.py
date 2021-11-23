@@ -25,7 +25,7 @@ parser.add_argument('--save_sample_every', type=int, default=1000, help='Save an
 
 # Mode
 parser.add_argument('--mode', type=str, default='train', choices=('train','test'), help='Select mode')
-parser.add_argument('--model_type', type=str, default='unconditional', 
+parser.add_argument('--model_type', type=str, default='conditional', 
                         choices=('unconditional','conditional'), help='Select model type')
 
 
@@ -106,7 +106,7 @@ model = Unet(
     dim = 64,
     dim_mults = dim_mults,
     channels = channels if model_type == 'unconditional' else channels+1,
-    out_dim = None if model_type == 'unconditional' else channels
+    out_dim = channels, 
 )
 
 model = model.to(device)
