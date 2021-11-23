@@ -392,6 +392,7 @@ class GaussianDiffusion(nn.Module):
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
     def p_mean_variance(self, x, t, clip_denoised: bool):
+        print(x.device, self.denoise_fn(x,t).device)
         x_recon = self.predict_start_from_noise(x, t=t, noise=self.denoise_fn(x, t))
 
         if clip_denoised:
@@ -411,11 +412,13 @@ class GaussianDiffusion(nn.Module):
 
     @torch.no_grad()
     def p_sample_loop(self, y, shape):
-        b = shape[0]
+        b,_,h,w = shape
         img = torch.randn(shape, device=self.device)
 
         for i in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
             if self.mode == 'conditional':
+                if y.shape != (b,1,h,w):
+                    y = self.label_reshaping(y, b, h, w, self.device)
                 img = self.label_concatenate(img,y)
             img = self.p_sample(img, torch.full((b,), i, dtype=torch.long))
         return img
