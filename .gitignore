@@ -11,7 +11,7 @@ nohup.out
 
 **.ipynb_checkpoints
 **.DS_Store
-**.sh
+# **.sh
 
 **/*.pt
 **/*.pth
