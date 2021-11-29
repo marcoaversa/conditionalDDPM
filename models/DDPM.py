@@ -474,7 +474,11 @@ class GaussianDiffusion(nn.Module):
         assert h == img_size and w == img_size, f'height and width of image must be {img_size}'
         t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
         if self.mode == 'conditional':
-            y = self.label_reshaping(y, b, h, w, device)
+            assert torch.is_tensor(y) and y.device == device
+            if len(y.shape) == 1: # Labels 1D
+                y = self.label_reshaping(y, b, h, w, device)
+            elif len(y.shape) == 3: 
+                y = y[:,None] # Label 2D
         return self.p_losses(x, t, y, *args, **kwargs)
 
 

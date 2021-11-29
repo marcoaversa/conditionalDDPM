@@ -11,6 +11,8 @@ import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
 from models.DDPM import Unet, GaussianDiffusion, Trainer
 
+from utils.dataset import import_dataset
+
 import argparse
 
 os.umask(0o002)
@@ -18,7 +20,7 @@ os.umask(0o002)
 parser = argparse.ArgumentParser(description='ConditionalDDPM')
 
 # Data & Results 
-parser.add_argument('--dataset', type=str, default='MNIST', choices=('MNIST','CIFAR10'), help='Choose the dataset')
+parser.add_argument('--dataset', type=str, default='MNIST', choices=('MNIST','CIFAR10','speckles'), help='Choose the dataset')
 parser.add_argument('--dataset_path', type=str, default='./data', help='Choose the dataset path')
 parser.add_argument('--logdir', type=str, default='./logs', help='results path')
 parser.add_argument('--save_sample_every', type=int, default=1000, help='Save and Sample after 1000 steps')
@@ -61,44 +63,7 @@ device = args.device
 
 # Define Dataset
 
-if data_name == 'MNIST':
-    # train set mean and std 
-    mu = (0.131,)
-    sigma = (0.308,)
-    image_size=28
-    channels=1
-    dim_mults=(1,2,4)
-
-elif data_name == 'CIFAR10':
-    # train set mean and std 
-    mu = (0.49139968, 0.48215827 , 0.44653124) 
-    sigma = (0.24703233, 0.24348505, 0.26158768)
-    image_size=32
-    channels=3
-    dim_mults=(1,2,4,8)
-    data_path = os.path.join(data_path, data_name)
-
-train_transform = transforms.Compose([
-        # transforms.RandomRotation(90),
-        # transforms.RandomHorizontalFlip(),
-        # transforms.RandomVerticalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize(mu, sigma)
-        ]) 
-
-test_transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mu, sigma)
-        ]) 
-
-dataset_class = getattr(torchvision.datasets, args.dataset)
-
-train_set = dataset_class(data_path, train = True, transform=train_transform, download=True)
-valid_set = dataset_class(data_path, train = False, transform=test_transform, download=True)
-
-train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
-valid_loader = DataLoader(valid_set, batch_size=batch_size, shuffle=False)
-
+train_loader, valid_loader, image_size, channels, dim_mults = import_dataset(data_name, batch_size)
 
 # Define Model
 
