@@ -14,6 +14,8 @@ from torch.optim import Adam
 from torchvision import transforms, utils
 from PIL import Image
 
+import matplotlib.pyplot as plt
+
 import numpy as np
 from tqdm import tqdm
 from einops import rearrange
@@ -415,8 +417,8 @@ class GaussianDiffusion(nn.Module):
         img = torch.randn(shape, device=self.device)
         for i in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
             if self.mode == 'conditional':
-                if y.shape != (b,1,h,w):
-                    y = self.label_reshaping(y, b, h, w, self.device)
+                if len(y.shape) == 1: # Labels 1D
+                    y = self.label_reshaping(y, b, h, w, self.device)   
                 img = self.label_concatenate(img,y)
             img = self.p_sample(img, torch.full((b,), i, dtype=torch.long, device=self.device))            
         return img
@@ -477,8 +479,6 @@ class GaussianDiffusion(nn.Module):
             assert torch.is_tensor(y) and y.device == device
             if len(y.shape) == 1: # Labels 1D
                 y = self.label_reshaping(y, b, h, w, device)
-            elif len(y.shape) == 3: 
-                y = y[:,None] # Label 2D
         return self.p_losses(x, t, y, *args, **kwargs)
 
 
@@ -573,29 +573,44 @@ class Trainer(object):
             return
         self.ema.update_model_average(self.ema_model, self.model)
 
-    def save(self, milestone, loss, y):
+    def save(self, loss):
         data = {
             'step': self.step,
             'model': self.model.state_dict(),
             'ema': self.ema_model.state_dict(),
             'loss': loss,
         }
-        # torch.save(data, str(self.results_folder / f'model-{milestone}.pt'))
         torch.save(data, str(self.results_folder / f'model.pt'))
         with open(str(self.results_folder / f'loss.txt'), 'w') as file:
             for element in loss:
                 file.write(str(element) + "\n")
-        if self.model_type == 'conditional':
-            writing_mode = 'w' if milestone == 1 else 'a+'
-            with open(str(self.results_folder / f'labels.txt'), writing_mode) as file:
-                file.write(f"sample-{milestone}: ")
-                for element in y:
-                    file.write(str(element.item()) + " ")
-                file.write("\n")
 
+    def save_with_1Dlabels(self, milestone, y, mode):
+        writing_mode = 'w' if milestone == 1 else 'a+'
+        with open(str(self.results_folder / f'labels-{mode}.txt'), writing_mode) as file:
+            file.write(f"sample-{milestone}: ")
+            for element in y:
+                file.write(str(element.item()) + " ")
+            file.write("\n")
 
-    def load(self, milestone):
-        data = torch.load(str(self.results_folder / f'model-{milestone}.pt'))
+    def save_with_2Dlabels(self, milestone, y, batches, mode):
+        
+        labels = list(map(lambda n: y[:n], batches))
+        labels = torch.cat(labels, dim=0)
+        self.save_grid(labels, str(self.results_folder / f'{milestone}-{mode}-labels.png'))
+
+    def save_grid(self, images, file_name, nrow=5):
+                
+        grid = utils.make_grid(images, nrow=nrow)
+        plt.figure()
+        if images.shape[1] == 1:
+            plt.imshow(grid[0].cpu().detach())
+        else:
+            plt.imshow(grid.permute((1,2,0)).cpu().detach())
+        plt.savefig(file_name)
+
+    def load(self):
+        data = torch.load(str(self.results_folder / f'model.pt'))
 
         self.step = data['step']
         self.model.load_state_dict(data['model'])
@@ -610,10 +625,7 @@ class Trainer(object):
 
             for imgs, labels in self.train_loader:
                 x=imgs.to(self.device)
-                if self.model_type == 'unconditional':
-                    y=None
-                elif self.model_type == 'conditional':
-                    y=labels.to(self.device)
+                y = None if self.model_type == 'unconditional' else labels.to(self.device)
                 loss = self.model(x,y)
                 backwards(loss / self.gradient_accumulate_every, self.opt)
                 if self.step != 0 and self.step % self.save_loss_every == 0:
@@ -635,10 +647,42 @@ class Trainer(object):
                     batches = num_to_groups(n_images_to_sample, self.batch_size) 
                     all_images_list = list(map(lambda n: self.ema_model.sample(y[:n], batch_size=n), batches))
                     all_images = torch.cat(all_images_list, dim=0)
-                    all_images = (all_images + 1) * 0.5
-                    utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow = 5)
-                    self.save(milestone, avg_loss, y)
+                    # all_images = (all_images + 1.)*0.5
+                    self.save_grid(all_images, str(self.results_folder / f'{milestone}-train-pred.png'), nrow = 5)
+                    self.save(avg_loss)
+                    if self.model_type == 'conditional':
+                        if len(y.shape) == 1:
+                            self.save_with_1Dlabels(milestone, y, mode='train') 
+                        else:
+                            self.save_with_2Dlabels(milestone, y, batches, mode='train')
 
                 self.step += 1
+
+        print('training completed')
+
+    def test(self):
+        imgs, labels = next(iter(self.train_loader))
+        x=imgs.to(self.device)
+        if self.model_type == 'unconditional':
+            y=None
+        elif self.model_type == 'conditional':
+            y=labels.to(self.device)
+
+        milestone = self.step // self.save_and_sample_every
+        n_images_to_sample = 25 
+        batches = num_to_groups(n_images_to_sample, self.batch_size) 
+
+        #Save Output
+        all_images_list = list(map(lambda n: self.ema_model.sample(y[:n], batch_size=n), batches))
+        all_images = torch.cat(all_images_list, dim=0)
+        # all_images = (all_images + 1) * 0.5
+        self.save_grid(all_images, str(self.results_folder / f'{milestone}-test-pred.png'), nrow = 5)
+
+        if self.model_type == 'conditional':
+            if len(y.shape) == 1:
+                self.save_with_1Dlabels(milestone, y, mode='test') 
+            else:
+                self.save_with_2Dlabels(milestone, y, batches, mode='test')
+            self.step += 1
 
         print('training completed')

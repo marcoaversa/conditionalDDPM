@@ -17,7 +17,7 @@ def import_dataset(data_name: str = 'MNIST', batch_size: str = 32):
     elif data_name == 'CIFAR10':
         train_loader, valid_loader, image_size, channels, dim_mults = import_cifar10(batch_size)
     elif data_name == 'speckles':
-        train_loader, valid_loader, image_size, channels, dim_mults = import_speckles(batch_size)
+        train_loader, valid_loader, image_size, channels, dim_mults = import_speckles(sum_from = 0, sum_to = 10, batch_size = batch_size)
 
     return train_loader, valid_loader, image_size, channels, dim_mults
 
@@ -53,7 +53,8 @@ def import_speckles(sum_from: int = 0, sum_to: int = 10, batch_size: int = 32):
     channels = 1
     dim_mults = (1,2,4)
     X = np.load(os.path.join(data_path, 'targets.npz'))['arr_0']
-    y = np.load(os.path.join(data_path, '80.0TMFPs.npz'))['arr_0'][:,:,:,sum_from:sum_to].sum(axis=3)
+    y = np.load(os.path.join(data_path, '80.0TMFPs.npz'))['arr_0'][:,:,:,sum_from:sum_to].sum(axis=3)[:,np.newaxis]
+    # y = np.load(os.path.join(data_path, '80.0TMFPs.npz'))['arr_0']
     train_size = int(len(X)*0.8)
 
     train_transform, test_transform = set_transforms(mu,sigma)

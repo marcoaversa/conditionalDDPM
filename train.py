@@ -88,17 +88,21 @@ device = device
 
 # Training
 
-if mode == 'train':
-
-    trainer = Trainer( 
-                        diffusion_model = diffusion, 
-                        train_loader = train_loader, 
-                        valid_loader = valid_loader, 
-                        model_type = model_type,
-                        results_folder = logdir,
-                        save_and_sample_every = save_sample_every,
-                        train_lr = lr,
-                        train_num_steps = train_num_steps,   
-                        device = device
+trainer = Trainer( 
+                    diffusion_model = diffusion, 
+                    train_loader = train_loader, 
+                    valid_loader = valid_loader, 
+                    model_type = model_type,
+                    results_folder = logdir,
+                    save_and_sample_every = save_sample_every,
+                    train_lr = lr,
+                    train_num_steps = train_num_steps,   
+                    device = device
                     )
+
+if mode == 'train':
     trainer.train()
+
+if mode == 'test':
+    trainer.load()
+    trainer.test()
