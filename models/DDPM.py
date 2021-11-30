@@ -593,11 +593,11 @@ class Trainer(object):
                 file.write(str(element.item()) + " ")
             file.write("\n")
 
-    def save_with_2Dlabels(self, milestone, y, batches, mode):
+    def save_with_2Dlabels(self, milestone, imgs, batches, mode, var_type):
         
-        labels = list(map(lambda n: y[:n], batches))
-        labels = torch.cat(labels, dim=0)
-        self.save_grid(labels, str(self.results_folder / f'{milestone}-{mode}-labels.png'))
+        imgs_stacked = list(map(lambda n: imgs[:n], batches))
+        imgs_stacked = torch.cat(imgs_stacked, dim=0)
+        self.save_grid(imgs_stacked, str(self.results_folder / f'{milestone}-{mode}-{var_type}.png'))
 
     def save_grid(self, images, file_name, nrow=5):
                 
@@ -654,7 +654,8 @@ class Trainer(object):
                         if len(y.shape) == 1:
                             self.save_with_1Dlabels(milestone, y, mode='train') 
                         else:
-                            self.save_with_2Dlabels(milestone, y, batches, mode='train')
+                            self.save_with_2Dlabels(milestone, x, batches, mode='train', var_type='original')
+                            self.save_with_2Dlabels(milestone, y, batches, mode='train', var_type='labels')
 
                 self.step += 1
 
@@ -682,7 +683,8 @@ class Trainer(object):
             if len(y.shape) == 1:
                 self.save_with_1Dlabels(milestone, y, mode='test') 
             else:
-                self.save_with_2Dlabels(milestone, y, batches, mode='test')
+                self.save_with_2Dlabels(milestone, x, batches, mode='test', var_type='original')
+                self.save_with_2Dlabels(milestone, y, batches, mode='test', var_type='labels')
             self.step += 1
 
         print('training completed')

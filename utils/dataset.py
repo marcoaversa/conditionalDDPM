@@ -17,7 +17,7 @@ def import_dataset(data_name: str = 'MNIST', batch_size: str = 32):
     elif data_name == 'CIFAR10':
         train_loader, valid_loader, image_size, channels, dim_mults = import_cifar10(batch_size)
     elif data_name == 'speckles':
-        train_loader, valid_loader, image_size, channels, dim_mults = import_speckles(sum_from = 0, sum_to = 10, batch_size = batch_size)
+        train_loader, valid_loader, image_size, channels, dim_mults = import_speckles(sum_from = 0, sum_to = 50, batch_size = batch_size)
 
     return train_loader, valid_loader, image_size, channels, dim_mults
 
