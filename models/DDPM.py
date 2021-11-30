@@ -655,7 +655,7 @@ class Trainer(object):
                             self.save_with_1Dlabels(milestone, y, mode='train') 
                         else:
                             self.save_with_2Dlabels(milestone, x, batches, mode='train', var_type='original')
-                            self.save_with_2Dlabels(milestone, y, batches, mode='train', var_type='labels')
+                            self.save_with_2Dlabels(milestone, y, batches, mode='train', var_type='condition')
 
                 self.step += 1
 
@@ -684,7 +684,7 @@ class Trainer(object):
                 self.save_with_1Dlabels(milestone, y, mode='test') 
             else:
                 self.save_with_2Dlabels(milestone, x, batches, mode='test', var_type='original')
-                self.save_with_2Dlabels(milestone, y, batches, mode='test', var_type='labels')
+                self.save_with_2Dlabels(milestone, y, batches, mode='test', var_type='condition')
             self.step += 1
 
         print('training completed')
