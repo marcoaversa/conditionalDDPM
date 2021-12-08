@@ -597,7 +597,7 @@ class Trainer(object):
         
         imgs_stacked = list(map(lambda n: imgs[:n], batches))
         imgs_stacked = torch.cat(imgs_stacked, dim=0)
-        self.save_grid(imgs_stacked, str(self.results_folder / f'{milestone}-{mode}-{var_type}.png'))
+        self.save_grid(imgs_stacked, str(self.results_folder / f'{milestone:03d}-{mode}-{var_type}.png'))
 
     def save_grid(self, images, file_name, nrow=5):
                 
@@ -645,10 +645,10 @@ class Trainer(object):
                     milestone = self.step // self.save_and_sample_every
                     n_images_to_sample = 25 
                     batches = num_to_groups(n_images_to_sample, self.batch_size) 
-                    all_images_list = list(map(lambda n: self.ema_model.sample(y[:n], batch_size=n), batches))
+                    all_images_list = list(map(lambda n: self.ema_model.sample(y if y == None else y[:n], batch_size=n), batches))    
                     all_images = torch.cat(all_images_list, dim=0)
                     # all_images = (all_images + 1.)*0.5
-                    self.save_grid(all_images, str(self.results_folder / f'{milestone}-train-pred.png'), nrow = 5)
+                    self.save_grid(all_images, str(self.results_folder / f'{milestone:03d}-train-pred.png'), nrow = 5)
                     self.save(avg_loss)
                     if self.model_type == 'conditional':
                         if len(y.shape) == 1:
@@ -677,7 +677,7 @@ class Trainer(object):
         all_images_list = list(map(lambda n: self.ema_model.sample(y[:n], batch_size=n), batches))
         all_images = torch.cat(all_images_list, dim=0)
         # all_images = (all_images + 1) * 0.5
-        self.save_grid(all_images, str(self.results_folder / f'{milestone}-test-pred.png'), nrow = 5)
+        self.save_grid(all_images, str(self.results_folder / f'{milestone:03d}-test-pred.png'), nrow = 5)
 
         if self.model_type == 'conditional':
             if len(y.shape) == 1:

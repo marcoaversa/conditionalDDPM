@@ -19,3 +19,5 @@ nohup.out
 **/*.png
 **/*.gif
 
+run_simulations.ipynb
+

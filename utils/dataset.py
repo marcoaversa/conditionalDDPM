@@ -8,48 +8,47 @@ import torchvision.transforms as transforms
 import torch
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
+from torch.nn.functional import interpolate
 
 args = dict(data_name= 'MNIST', data_path= './data', batch_size= 32)
     
-def import_dataset(data_name: str = 'MNIST', batch_size: str = 32):
+def import_dataset(data_name: str = 'MNIST', batch_size: str = 32, image_size: int = 28):
     if data_name == 'MNIST':
-        train_loader, valid_loader, image_size, channels, dim_mults = import_mnist(batch_size)
+        train_loader, valid_loader, image_size, channels, dim_mults = import_mnist(batch_size, image_size)
     elif data_name == 'CIFAR10':
-        train_loader, valid_loader, image_size, channels, dim_mults = import_cifar10(batch_size)
+        train_loader, valid_loader, image_size, channels, dim_mults = import_cifar10(batch_size, image_size)
     elif data_name == 'speckles':
-        train_loader, valid_loader, image_size, channels, dim_mults = import_speckles(sum_from = 0, sum_to = 50, batch_size = batch_size)
+        train_loader, valid_loader, image_size, channels, dim_mults = import_speckles(sum_from = 0, sum_to = 50, 
+                                                                                      batch_size = batch_size, image_size = image_size)
 
     return train_loader, valid_loader, image_size, channels, dim_mults
 
-def import_mnist(batch_size: int = 32):
+def import_mnist(batch_size: int = 32, image_size: int = 28):
     data_name = 'MNIST'
     data_path = './data'
     mu = (0.131,)
     sigma = (0.308,)
-    image_size=28
     channels=1
     dim_mults=(1,2,4)
     train_set, valid_set = import_from_torchvision(data_name, data_path, mu, sigma)
     train_loader, valid_loader = set_dataloaders(train_set, valid_set, batch_size)
     return train_loader, valid_loader, image_size, channels, dim_mults
 
-def import_cifar10(batch_size: int = 32):
+def import_cifar10(batch_size: int = 32, image_size: int = 32):
     data_name = 'CIFAR10'
     data_path = os.path.join('./data', data_name)
     mu = (0.49139968, 0.48215827 , 0.44653124) 
     sigma = (0.24703233, 0.24348505, 0.26158768)
-    image_size=32
     channels=3
     dim_mults=(1,2,4,8)
     train_set, valid_set = import_from_torchvision(data_name, data_path, mu, sigma)
     train_loader, valid_loader = set_dataloaders(train_set, valid_set, batch_size)
     return train_loader, valid_loader, image_size, channels, dim_mults
 
-def import_speckles(sum_from: int = 0, sum_to: int = 10, batch_size: int = 32):
+def import_speckles(sum_from: int = 0, sum_to: int = 10, batch_size: int = 32, image_size: int = 28):
     data_path = './data/speckles'
     mu = (0,)
     sigma = (1,)
-    image_size = 28
     channels = 1
     dim_mults = (1,2,4)
     X = np.load(os.path.join(data_path, 'targets.npz'))['arr_0']
@@ -59,8 +58,8 @@ def import_speckles(sum_from: int = 0, sum_to: int = 10, batch_size: int = 32):
 
     train_transform, test_transform = set_transforms(mu,sigma)
 
-    train_set = CustomTensorDataset( (X[:train_size], y[:train_size]), transform=train_transform )
-    valid_set = CustomTensorDataset( (X[train_size:], y[train_size:]), transform=test_transform )
+    train_set = CustomTensorDataset( (X[:train_size], y[:train_size]), transform=train_transform , size = image_size )
+    valid_set = CustomTensorDataset( (X[train_size:], y[train_size:]), transform=test_transform , size = image_size )
     train_loader, valid_loader = set_dataloaders(train_set, valid_set, batch_size)
     return train_loader, valid_loader, image_size, channels, dim_mults
 
@@ -105,10 +104,11 @@ def set_dataloaders(train_set, valid_set, batch_size: int = 32):
 
 class CustomTensorDataset(Dataset):
     """TensorDataset with support of transforms."""
-    def __init__(self, tensors, transform=None):
+    def __init__(self, tensors, transform=None, size: int = 28):
         assert all(tensors[0].shape[0] == tensor.shape[0] for tensor in tensors)
         self.tensors = tensors
         self.transform = transform
+        self.size = size
 
     def __getitem__(self, index):
         x = self.tensors[0][index]
@@ -117,6 +117,9 @@ class CustomTensorDataset(Dataset):
         if self.transform:
             x = self.transform(x)
             y = Tensor(y)
+            
+        x = self.upsample_img(x)
+        y = self.upsample_img(y)
 
         x = x.type(torch.FloatTensor)        
         y = y.type(torch.FloatTensor)
@@ -125,6 +128,15 @@ class CustomTensorDataset(Dataset):
 
     def __len__(self):
         return self.tensors[0].shape[0]
+    
+    def upsample_img(self, imgs: torch.Tensor):
+        c,h,w = imgs.shape
+        if self.size == h:
+            return imgs
+        elif self.size > h:
+            return torch.squeeze(interpolate(imgs[None], size=(256,256)), dim=0)
+        elif self.size < h:
+            assert self.size < h, 'I haven t implemented yet the downsampling'
 
 if __name__=='__main__':        
     train_loader, valid_loader = import_dataset(args)

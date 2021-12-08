@@ -63,7 +63,7 @@ device = args.device
 
 # Define Dataset
 
-train_loader, valid_loader, image_size, channels, dim_mults = import_dataset(data_name, batch_size)
+train_loader, valid_loader, image_size, channels, dim_mults = import_dataset(data_name, batch_size, image_size)
 
 # Define Model
 
