@@ -1,6 +1,5 @@
 """Copyright (c) 2020 Phil Wang"""
 
-import os
 import math
 import copy
 import torch
@@ -16,8 +15,6 @@ from torchvision import transforms, utils
 from PIL import Image
 
 import matplotlib.pyplot as plt
-
-import imageio
 
 import numpy as np
 from tqdm import tqdm
@@ -205,6 +202,10 @@ class Unet(nn.Module):
         with_time_emb = True
     ):
         super().__init__()
+        self.dim = dim
+        self.out_dim = out_dim
+        self.dim_mults = dim_mults
+        self.groups = groups
         self.channels = channels
 
         dims = [channels, *map(lambda m: dim * m, dim_mults)]
@@ -324,6 +325,14 @@ class GaussianDiffusion(nn.Module):
         self.channels = channels
         self.image_size = image_size
         self.denoise_fn = denoise_fn
+        if self.mode == 'c_learn':            
+            self.noise_gen = Unet(
+                                dim = self.denoise_fn.dim,
+                                dim_mults = self.denoise_fn.dim_mults,
+                                channels = self.denoise_fn.channels*2,
+                                out_dim = self.denoise_fn.channels*2, 
+                                with_time_emb = False)
+            self.noise_gen = self.noise_gen.to(device)
 
         self.device=device
 
@@ -416,14 +425,21 @@ class GaussianDiffusion(nn.Module):
 
     @torch.no_grad()
     def p_sample_loop(self, y, shape):
-        b,_,h,w = shape
-        img = torch.randn(shape, device=self.device)
+        b,c,h,w = shape
+        
+        if self.mode == 'c_learn':
+            condition = self.label_concatenate(y,y)
+            output = self.noise_gen(condition, None)
+            mu, log_var = output[:,:c], output[:,c:]
+            img = torch.normal(mu, log_var.exp()).to(self.device)
+        else:
+            img = torch.randn(shape, device=self.device)
         for i in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
-            if self.mode == 'c':
+            if self.mode == 'c_fix':
                 if len(y.shape) == 1: # Labels 1D
                     y = self.label_reshaping(y, b, h, w, self.device)   
                 img = self.label_concatenate(img,y)
-            img = self.p_sample(img, torch.full((b,), i, dtype=torch.long, device=self.device))   
+            img = self.p_sample(img, torch.full((b,), i, dtype=torch.long, device=self.device))            
         return img
 
     @torch.no_grad()
@@ -458,27 +474,44 @@ class GaussianDiffusion(nn.Module):
 
     def p_losses(self, x_start, t, y=None, noise = None):
         b, c, h, w = x_start.shape
-        noise = default(noise, lambda: torch.randn_like(x_start)).to(x_start.device)
-
+        if self.mode == 'c_learn':
+            condition = self.label_concatenate(x_start,y) if torch.rand(1) > 0.5 else self.label_concatenate(y,y)
+            output = self.noise_gen(condition, None)
+            mu, log_var = output[:,:c], output[:,c:]
+            noise = torch.normal(mu, log_var.exp()).to(x_start.device)
+        else:
+            noise = default(noise, lambda: torch.randn_like(x_start)).to(x_start.device)
+        
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
-        if self.mode == 'c':
+        
+        if self.mode == 'c_fix':
             x_noisy = self.label_concatenate(x_noisy, y)
+            
         x_recon = self.denoise_fn(x_noisy, t)
 
         if self.loss_type == 'l1':
             loss = (noise - x_recon).abs().mean()
+            if self.mode == 'c_learn':
+                loss += (noise - default(noise, lambda: torch.randn_like(x_start)).to(x_start.device)).abs().mean()
         elif self.loss_type == 'l2':
             loss = F.mse_loss(noise, x_recon)
+#             print('loss1',loss)
+            if self.mode == 'c_learn':
+#                 loss += F.mse_loss(noise, torch.randn_like(x_start, device=x_start.device))
+#                 loss_noise = torch.nn.KLDivLoss()(noise, torch.randn_like(x_start, device=x_start.device))
+                loss_noise = -0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp())
+                loss += loss_noise
+#                 print('loss2', loss_noise)
         else:
             raise NotImplementedError()
-
+        
         return loss
 
     def forward(self, x, y=None, *args, **kwargs):
         b, c, h, w, device, img_size, = *x.shape, x.device, self.image_size
         assert h == img_size and w == img_size, f'height {h} and width {w} of image must be {img_size}'
         t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
-        if self.mode == 'c':
+        if self.mode == 'c_fix':
             assert torch.is_tensor(y) and y.device == device
             if len(y.shape) == 1: # Labels 1D
                 y = self.label_reshaping(y, b, h, w, device)
@@ -512,7 +545,7 @@ class Dataset(data.Dataset):
 
 # trainer class
 
-class TrainerDDPM(object):
+class Trainer(object):
     def __init__(
         self,
         diffusion_model,
@@ -529,12 +562,11 @@ class TrainerDDPM(object):
         step_start_ema = 2000,
         update_ema_every = 10,
         save_and_sample_every = 1000,
-        results_folder = './logs',
+        results_folder = './results',
         device = 'cuda'
     ):
         super().__init__()
-        
-        self.model = diffusion_model        
+        self.model = diffusion_model
         self.model_type = model_type
         self.ema = EMA(ema_decay)
         self.ema_model = copy.deepcopy(self.model)
@@ -552,7 +584,7 @@ class TrainerDDPM(object):
         self.train_loader = train_loader
         self.valid_loader = valid_loader
         self.opt = Adam(diffusion_model.parameters(), lr=train_lr)
-        
+
         self.step = 0
 
         self.device = device
@@ -646,33 +678,40 @@ class TrainerDDPM(object):
                     self.step_ema()
 
                 if self.step != 0 and self.step % self.save_and_sample_every == 0:
-                    imgs, labels = next(iter(self.valid_loader))
-                    x_val=imgs.to(self.device)
-                    y_val = None if self.model_type == 'unc' else labels.to(self.device)
                     milestone = self.step // self.save_and_sample_every
                     n_images_to_sample = 25 
                     batches = num_to_groups(n_images_to_sample, self.batch_size) 
-                    all_images_list = list(map(lambda n: self.ema_model.sample(y_val if y_val == None else y_val[:n], batch_size=n), batches))    
-                    all_images = torch.clip(torch.cat(all_images_list, dim=0),0.,1.)
+                    all_images_list = list(map(lambda n: self.ema_model.sample(y if y == None else y[:n], batch_size=n), batches))    
+                    all_images = torch.cat(all_images_list, dim=0)
                     # all_images = (all_images + 1.)*0.5
                     self.save_grid(all_images, str(self.results_folder / f'{milestone:03d}-train-pred.png'), nrow = 5)
                     self.save(avg_loss)
-                    if self.model_type == 'c':
+                    if self.model_type == 'c_fix' or self.model_type == 'c_learn':
                         if len(y.shape) == 1:
-                            self.save_with_1Dlabels(milestone, y_val, mode='train') 
+                            self.save_with_1Dlabels(milestone, y, mode='train') 
                         else:
-                            self.save_with_2Dlabels(milestone, x_val, batches, mode='train', var_type='original')
-                            self.save_with_2Dlabels(milestone, y_val if y_val.shape[1]!= 2 else y_val[:,0][:,None], batches, mode='train', var_type='condition')
+                            self.save_with_2Dlabels(milestone, x, batches, mode='train', var_type='original')
+                            self.save_with_2Dlabels(milestone, y, batches, mode='train', var_type='condition')
+                            if self.model_type == 'c_learn':
+                                mu_logvar_list = list(map(lambda n: self.ema_model.noise_gen(self.ema_model.label_concatenate(y[:n],y[:n]), None), batches)) 
+                                mu_logvar = torch.cat(mu_logvar_list, dim=0)
+                                b,c,h,w = mu_logvar.shape
+                                mu, log_var = mu_logvar[:,:int(c//2)], mu_logvar[:,int(c//2):]
+                                noise = torch.normal(mu,log_var.exp())
+                                self.save_grid(noise, str(self.results_folder / f'{milestone:03d}-train-noise.png'), nrow = 5)
 
                 self.step += 1
 
         print('training completed')
 
     def test(self):
-        imgs, labels = next(iter(self.valid_loader))
+        imgs, labels = next(iter(self.train_loader))
         x=imgs.to(self.device)
-        y = None if self.model_type == 'unc' else labels.to(self.device)
-        
+        if self.model_type == 'unc':
+            y=None
+        elif self.model_type == 'c_fix':
+            y=labels.to(self.device)
+
         milestone = self.step // self.save_and_sample_every
         n_images_to_sample = 25 
         batches = num_to_groups(n_images_to_sample, self.batch_size) 
@@ -683,93 +722,10 @@ class TrainerDDPM(object):
         # all_images = (all_images + 1) * 0.5
         self.save_grid(all_images, str(self.results_folder / f'{milestone:03d}-test-pred.png'), nrow = 5)
 
-        if self.model_type == 'c':
+        if self.model_type == 'c_fix':
             if len(y.shape) == 1:
                 self.save_with_1Dlabels(milestone, y, mode='test') 
             else:
                 self.save_with_2Dlabels(milestone, x, batches, mode='test', var_type='original')
                 self.save_with_2Dlabels(milestone, y, batches, mode='test', var_type='condition')
             self.step += 1
-            
-            
-    def GIFs(self, gif_type = 'sampling'):
-        """Generate GIFs"""
-        
-        assert gif_type in ('sampling','histo'), 'gif_type should be one of (sampling,histo)'
-        
-        model = self.ema_model
-        
-        imgs, labels = next(iter(self.valid_loader))
-        y = None if model.mode == 'unc' else labels.to(model.device)
-        y = y[:25]
-            
-        shape = (25, model.channels, model.image_size, model.image_size)
-        
-        print(f'Generating {gif_type} GIF')
-            
-        b,_,h,w = shape
-        img = torch.randn(shape, device=model.device)
-        
-        with imageio.get_writer(str(self.results_folder / f'{gif_type}.gif'), mode='I',fps=30) as writer:
-            for i in tqdm(reversed(range(0, model.num_timesteps)), desc='sampling loop time step', total=model.num_timesteps):
-
-                if gif_type == 'sampling':
-                    grid = np.array(utils.make_grid(img, nrow=5).permute((1,2,0)).cpu().detach())
-    #                 to_save = np.array(img[0].squeeze().detach().cpu()).copy()
-                    writer.append_data((np.clip(grid*255, 0, 255).astype(np.uint8)))
-
-                elif gif_type == 'histo':
-                    # https://stackoverflow.com/questions/5320677/how-to-normalize-a-histogram-in-matlab
-                    # Remark: bin_width < 1 --> p(x) can be higher than 1. The important thing is that the Area is 1.
-                    # The Probability to have a value x is equal to p(x)*bin_width
-                    hist,bin_edges = np.histogram(np.array(img.flatten().cpu().detach()), bins=30, range=(-2.0,2.0))
-                    dx = bin_edges[1]-bin_edges[0]
-                    plt.figure()
-                    plt.scatter((bin_edges[:-1]+bin_edges[1:])/2, hist/(dx*hist.sum())) 
-    #                 print(dx*(hist/(dx*hist.sum())).sum()) # Check Area = 1
-                    plt.ylim(0.,1.0)
-                    plt.xlabel('x')
-                    plt.ylabel('pdf(x)')
-                    plt.savefig('./logs/test.png')
-                    plt.close()
-                    npimage = imageio.imread('./logs/test.png')
-                    writer.append_data(npimage)
-                    os.remove('./logs/test.png')
-                if self.model_type == 'c':
-                    if len(y.shape) == 1: # Labels 1D
-                        y = model.label_reshaping(y, b, h, w, model.device)   
-                    img = model.label_concatenate(img,y)
-                img = model.p_sample(img, torch.full((b,), i, dtype=torch.long, device=model.device))   
-                
-    def entropy(self):
-        
-        model = self.ema_model
-        
-        imgs, labels = next(iter(self.valid_loader))
-        y = None if model.mode == 'unc' else labels.to(model.device)
-        y = y[:25]
-            
-        shape = (25, model.channels, model.image_size, model.image_size)
-        
-        b,_,h,w = shape
-        img = torch.randn(shape, device=model.device)
-        
-        entropy = []
-        for i in tqdm(reversed(range(0, model.num_timesteps)), desc='sampling loop time step', total=model.num_timesteps):
-            
-            hist,bin_edges = np.histogram(np.array(img.flatten().cpu().detach()), bins=30, range=(-2.0,2.0))
-            dx = bin_edges[1]-bin_edges[0]
-            hist = hist/(dx*hist.sum())
-            entropy.append(-(hist*np.log(np.abs(hist))).sum())
-
-            if self.model_type == 'c':
-                if len(y.shape) == 1: # Labels 1D
-                    y = model.label_reshaping(y, b, h, w, model.device)   
-                img = model.label_concatenate(img,y)
-            img = model.p_sample(img, torch.full((b,), i, dtype=torch.long, device=model.device))  
-            
-        plt.figure()
-        plt.scatter(np.linspace(1,1000,1000), entropy)
-        plt.xlabel('Step')
-        plt.ylabel('Entropy')
-        plt.savefig(str(self.results_folder / 'entropy.png'))

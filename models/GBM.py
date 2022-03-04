@@ -281,307 +281,193 @@ class Unet(nn.Module):
             x = upsample(x)
 
         return self.final_conv(x)
-
-# gaussian diffusion trainer class
-
-def extract(a, t, x_shape):
-    b, *_ = t.shape
-    out = a.gather(-1, t)
-    return out.reshape(b, *((1,) * (len(x_shape) - 1)))
-
-def noise_like(shape, device, repeat=False):
-    repeat_noise = lambda: torch.randn((1, *shape[1:]), device=device).repeat(shape[0], *((1,) * (len(shape) - 1)))
-    noise = lambda: torch.randn(shape, device=device)
-    return repeat_noise() if repeat else noise()
-
-def cosine_beta_schedule(timesteps, s = 0.008):
-    """
-    cosine schedule
-    as proposed in https://openreview.net/forum?id=-NEXDKk8gZ
-    """
-    steps = timesteps + 1
-    x = np.linspace(0, steps, steps)
-    alphas_cumprod = np.cos(((x / steps) + s) / (1 + s) * np.pi * 0.5) ** 2
-    alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
-    betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
-    return np.clip(betas, a_min = 0, a_max = 0.999)
-
-class GaussianDiffusion(nn.Module):
+    
+class GBM(nn.Module):
     def __init__(
         self,
-        denoise_fn,
-        *,
-        model_type = 'unc',
+        model,
         image_size,
         channels = 3,
-        timesteps = 1000,
+        subtimeseries_length = 3,
+        timesteps = 500,
         loss_type = 'l1',
-        betas = None,
         device='cuda'
     ):
         super().__init__()
-        self.mode = model_type
-        self.channels = channels
+        self.model = model
         self.image_size = image_size
-        self.denoise_fn = denoise_fn
+        self.channels = channels
+        self.k = subtimeseries_length
+        self.num_timesteps = timesteps
+        self.loss_type = loss_type
 
         self.device=device
 
-        if exists(betas):
-            betas = betas.detach().cpu().numpy() if isinstance(betas, torch.Tensor) else betas
-        else:
-            betas = cosine_beta_schedule(timesteps)
-
-        alphas = 1. - betas
-        alphas_cumprod = np.cumprod(alphas, axis=0)
-        alphas_cumprod_prev = np.append(1., alphas_cumprod[:-1])
-
-        timesteps, = betas.shape
-        self.num_timesteps = int(timesteps)
-        self.loss_type = loss_type
-
-        to_torch = partial(torch.tensor, dtype=torch.float32, device=self.device)
-
-        self.register_buffer('betas', to_torch(betas))
-        self.register_buffer('alphas_cumprod', to_torch(alphas_cumprod))
-        self.register_buffer('alphas_cumprod_prev', to_torch(alphas_cumprod_prev))
-
-        # calculations for diffusion q(x_t | x_{t-1}) and others
-        self.register_buffer('sqrt_alphas_cumprod', to_torch(np.sqrt(alphas_cumprod)))
-        self.register_buffer('sqrt_one_minus_alphas_cumprod', to_torch(np.sqrt(1. - alphas_cumprod)))
-        self.register_buffer('log_one_minus_alphas_cumprod', to_torch(np.log(1. - alphas_cumprod)))
-        self.register_buffer('sqrt_recip_alphas_cumprod', to_torch(np.sqrt(1. / alphas_cumprod)))
-        self.register_buffer('sqrt_recipm1_alphas_cumprod', to_torch(np.sqrt(1. / alphas_cumprod - 1)))
-
-        # calculations for posterior q(x_{t-1} | x_t, x_0)
-        posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
-        # above: equal to 1. / (1. / (1. - alpha_cumprod_tm1) + alpha_t / beta_t)
-        self.register_buffer('posterior_variance', to_torch(posterior_variance))
-        # below: log calculation clipped because the posterior variance is 0 at the beginning of the diffusion chain
-        self.register_buffer('posterior_log_variance_clipped', to_torch(np.log(np.maximum(posterior_variance, 1e-20))))
-        self.register_buffer('posterior_mean_coef1', to_torch(
-            betas * np.sqrt(alphas_cumprod_prev) / (1. - alphas_cumprod)))
-        self.register_buffer('posterior_mean_coef2', to_torch(
-            (1. - alphas_cumprod_prev) * np.sqrt(alphas) / (1. - alphas_cumprod)))
-
-
-    def label_reshaping(self, y, b, h, w, device):
-        # y = torch.tensor(y)
-        assert len(y.shape) == 1, 'labels array is 1D'
-        assert torch.is_tensor(y), 'labels array should be a pytorch tensor'
-        labels = torch.ones((b,1,h,w)).to(device)
-        return torch.einsum('ijkl,i->ijkl', labels, y)
-
-    def label_concatenate(self, x,y):
-        return torch.cat([x,y],dim=1)
-
-    def q_mean_variance(self, x_start, t):
-        mean = extract(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start
-        variance = extract(1. - self.alphas_cumprod, t, x_start.shape)
-        log_variance = extract(self.log_one_minus_alphas_cumprod, t, x_start.shape)
-        return mean, variance, log_variance
-
-    def predict_start_from_noise(self, x_t, t, noise):
-        return (
-            extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t -
-            extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * noise
-        )
-
-    def q_posterior(self, x_start, x_t, t):
-        posterior_mean = (
-            extract(self.posterior_mean_coef1, t, x_t.shape) * x_start +
-            extract(self.posterior_mean_coef2, t, x_t.shape) * x_t
-        )
-        posterior_variance = extract(self.posterior_variance, t, x_t.shape)
-        posterior_log_variance_clipped = extract(self.posterior_log_variance_clipped, t, x_t.shape)
-        return posterior_mean, posterior_variance, posterior_log_variance_clipped
-
-    def p_mean_variance(self, x, t, clip_denoised: bool):
-        x_recon = self.predict_start_from_noise(x[:,:self.channels], t=t, noise=self.denoise_fn(x, t))
-
-        if clip_denoised:
-            x_recon.clamp_(-1., 1.)
-
-        model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start=x_recon, x_t=x[:,:self.channels], t=t)
-        return model_mean, posterior_variance, posterior_log_variance
+        
+    def extract(self, a, t, x_shape):
+        b, *_ = t.shape
+        out = a.gather(-1, t)
+        return out.reshape(b, *((1,) * (len(x_shape) - 1)))
+        
+    @torch.no_grad()
+    def p_sample(self, x, t):
+#         mu_sigma = self.propagator(x, t)
+#         mu=mu_sigma[:,:self.channels]
+#         sigma=mu_sigma[:,self.channels:]
+#         diff = self.propagator(x,t)
+#         x_t = self.time_evolution(x, t, mu, sigma)
+#         return x_t
+#         diff = self.model(x,t)
+#         return self.time_evolution(x, diff)
+        err = self.model(x, t)
+        mu=err[:,:self.channels]
+        sigma=err[:,self.channels:]
+        return x-(mu+sigma*torch.randn_like(x))
 
     @torch.no_grad()
-    def p_sample(self, x, t, clip_denoised=True, repeat_noise=False):
-        b, *_ = x.shape
-        model_mean, _, model_log_variance = self.p_mean_variance(x=x, t=t, clip_denoised=clip_denoised)
-        noise = noise_like(x[:,:self.channels].shape, self.device, repeat_noise)
-        # no noise when t == 0
-        nonzero_mask = (1 - (t == 0).float()).reshape(b, *((1,) * (len(x.shape) - 1)))
-        return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
-
-    @torch.no_grad()
-    def p_sample_loop(self, y, shape):
+    def p_sample_loop(self, img, shape):
         b,_,h,w = shape
-        img = torch.randn(shape, device=self.device)
         for i in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
-            if self.mode == 'c':
-                if len(y.shape) == 1: # Labels 1D
-                    y = self.label_reshaping(y, b, h, w, self.device)   
-                img = self.label_concatenate(img,y)
             img = self.p_sample(img, torch.full((b,), i, dtype=torch.long, device=self.device))   
         return img
 
     @torch.no_grad()
-    def sample(self, y=None, batch_size = 16):
+    def sample(self, x, batch_size = 16):
         image_size = self.image_size
         channels = self.channels
-        return self.p_sample_loop(y, (batch_size, channels, image_size, image_size))
+        return self.p_sample_loop(x, (batch_size, channels, image_size, image_size))
+    
+    def sub_timeseries(self, x, t):
+        b,n,c,h,w = x.shape
+        mask = torch.zeros_like(x)
+        for count, i in enumerate(t):
+            for j in range(-self.k,self.k+1):
+                mask[count,i+j] = 1
+        return x[mask==1].reshape(b,self.k*2+1,c,h,w)
+    
+    def stack_on_axis(self,x):
+        return torch.cat([x[:,i] for i in range(self.k*2+1)], dim=1)
+    
+    def time_evolution(self, x, t, mu, sigma):
+            
+        W_t = torch.zeros_like(x)
+        for count, i in enumerate(t):
+            for j in range(i):
+                W_t[count] += torch.randn_like(x)[0]
+        prop = torch.exp((mu + 0.5*sigma**2) + sigma*W_t) #Propagator
+        assert x.shape == prop.shape, f'Input shape {x.shape} must be equal to the propagator shape {prop.shape}'
+        return x*prop
 
-    @torch.no_grad()
-    def interpolate(self, x1, x2, t = None, lam = 0.5):
-        b, *_, device = *x1.shape, x1.device
-        t = default(t, self.num_timesteps - 1)
+#         print(f"x start mean: {x.mean().item()} std:{x.std().item()}")
 
-        assert x1.shape == x2.shape
 
-        t_batched = torch.stack([torch.tensor(t, device=device)] * b)
-        xt1, xt2 = map(lambda x: self.q_sample(x, t=t_batched), (x1, x2))
+#         x_mean = x*torch.exp(mu)
+#         x_var = torch.sqrt(x**2 * torch.exp(2*mu)*(torch.exp(sigma**2)-1))
+#         x =  x_mean + x_var*torch.randn_like(x)
+        
+        
+#         print(f"x after mean: {x.mean().item()} std:{x.std().item()}")
+#         print(f"x_mean mean: {x_mean.mean().item()} std:{x_mean.std().item()}")
+#         print(f"x_std start mean: {x_var.mean().item()} std:{x_var.std().item()}")
+#         print(f"x**2 mean: {(x**2).mean().item()} std:{(x**2).std().item()}")
+#         print(f"exp(2*mu) mean: {torch.exp(2*mu).mean().item()} std:{torch.exp(2*mu).std().item()}")
+#         print(f"exp(sigma**2) mean: {torch.exp(sigma**2).mean().item()} std:{torch.exp(sigma**2).std().item()}")
+#         print(f"mu start mean: {mu.mean().item()} std:{mu.std().item()}")
+#         print(f"sigma start mean: {sigma.mean().item()} std:{sigma.std().item()}\n")
+        
+#         return x
 
-        img = (1 - lam) * xt1 + lam * xt2
-        for i in tqdm(reversed(range(0, t)), desc='interpolation sample time step', total=t):
-            img = self.p_sample(img, torch.full((b,), i, device=device, dtype=torch.long))
 
-        return img
+#     def time_evolution(self, x, err):
+# #         return (x-err)+ err*torch.randn_like(x)
+#         return x-err
 
-    def q_sample(self, x_start, t, noise=None):
-        noise = default(noise, lambda: torch.randn_like(x_start)).to(x_start.device)
+    def p_losses(self, x_start, t, y=None):
+        x_start = self.sub_timeseries(x_start, t)
+        
+        gt_mu = torch.mean(x_start,dim=1)
+        gt_sigma = torch.clamp(torch.std(x_start,dim=1),0.0000001)
+        
 
-        return (
-            extract(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
-            extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise
-        )
-
-    def p_losses(self, x_start, t, y=None, noise = None):
-        b, c, h, w = x_start.shape
-        noise = default(noise, lambda: torch.randn_like(x_start)).to(x_start.device)
-
-        x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
-        if self.mode == 'c':
-            x_noisy = self.label_concatenate(x_noisy, y)
-        x_recon = self.denoise_fn(x_noisy, t)
+        err = self.model(x_start[:,self.k-1], t)
+        p_mu=err[:,:self.channels]
+        p_sigma=torch.clamp(err[:,self.channels:],0.0000001)
+        
+#         print(p_mu.min(), p_mu.max(), gt_mu.min(), gt_mu.max())
+        
+        x_t = self.time_evolution(x_start[:,self.k-1], t, p_mu, p_sigma)
 
         if self.loss_type == 'l1':
-            loss = (noise - x_recon).abs().mean()
+            loss = (x_t - x_start[:,self.k]).abs().mean() 
         elif self.loss_type == 'l2':
-            loss = F.mse_loss(noise, x_recon)
-        else:
-            raise NotImplementedError()
+            loss = F.mse_loss(x_t, x_start[:,self.k])
+
+#         loss = F.mse_loss(gt_mu-p_mu) + F.mse_loss(gt_sigma, p_sigma)
+
+#         loss = F.mse_loss(x_start[:,k]-x_start[:,k-1], err)
+#         loss = F.mse_loss(mu + sigma*torch.randn_like(x_start[:,0]),torch.randn_like(x_start[:,0]))
+#         loss += F.mse_loss(x_t, x_start[:,k])
+        
+#         loss = F.mse_loss((x_start[:,k]-x_start[:,k-1]), mu+sigma*torch.randn_like(x_start[:,k]))
+    
+        p = torch.distributions.normal.Normal(p_mu, p_sigma)
+        q = torch.distributions.normal.Normal(gt_mu, gt_sigma)
+#         q = torch.distributions.normal.Normal(torch.zeros_like(p_mu), torch.ones_like(p_mu))
+        
+        loss += torch.distributions.kl.kl_divergence(p, q).mean()
 
         return loss
 
     def forward(self, x, y=None, *args, **kwargs):
-        b, c, h, w, device, img_size, = *x.shape, x.device, self.image_size
+        x = x if len(x.shape) == 5 else x[:,:,None]
+        b, n, c, h, w, device, img_size, = *x.shape, x.device, self.image_size
         assert h == img_size and w == img_size, f'height {h} and width {w} of image must be {img_size}'
-        t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
-        if self.mode == 'c':
-            assert torch.is_tensor(y) and y.device == device
-            if len(y.shape) == 1: # Labels 1D
-                y = self.label_reshaping(y, b, h, w, device)
+        t = torch.randint(self.k, self.num_timesteps-self.k-1, (b,), device=device).long()
         return self.p_losses(x, t, y, *args, **kwargs)
-
-
-# dataset classes
-
-class Dataset(data.Dataset):
-    def __init__(self, folder, image_size, exts = ['jpg', 'jpeg', 'png']):
-        super().__init__()
-        self.folder = folder
-        self.image_size = image_size
-        self.paths = [p for ext in exts for p in Path(f'{folder}').glob(f'**/*.{ext}')]
-
-        self.transform = transforms.Compose([
-            transforms.Resize(image_size),
-            transforms.RandomHorizontalFlip(),
-            transforms.CenterCrop(image_size),
-            transforms.ToTensor(),
-            transforms.Lambda(lambda t: (t * 2) - 1)
-        ])
-
-    def __len__(self):
-        return len(self.paths)
-
-    def __getitem__(self, index):
-        path = self.paths[index]
-        img = Image.open(path)
-        return self.transform(img)
 
 # trainer class
 
-class TrainerDDPM(object):
+class TrainerGBM(object):
     def __init__(
         self,
-        diffusion_model,
+        model,
         train_loader,
         valid_loader,
-        *,
-        model_type = 'unc',
-        ema_decay = 0.995,
         train_batch_size = 32,
         train_lr = 2e-5,
         train_num_steps = 100000,
         gradient_accumulate_every = 2,
-        fp16 = False,
-        step_start_ema = 2000,
-        update_ema_every = 10,
         save_and_sample_every = 1000,
         results_folder = './logs',
         device = 'cuda'
     ):
         super().__init__()
         
-        self.model = diffusion_model        
-        self.model_type = model_type
-        self.ema = EMA(ema_decay)
-        self.ema_model = copy.deepcopy(self.model)
-        self.update_ema_every = update_ema_every
-
-        self.step_start_ema = step_start_ema
+        self.model = model
+        
         self.save_and_sample_every = save_and_sample_every
         self.save_loss_every = 50
 
         self.batch_size = train_batch_size
-        self.image_size = diffusion_model.image_size
+        self.image_size = model.image_size
         self.gradient_accumulate_every = gradient_accumulate_every
         self.train_num_steps = train_num_steps
 
         self.train_loader = train_loader
         self.valid_loader = valid_loader
-        self.opt = Adam(diffusion_model.parameters(), lr=train_lr)
+        self.opt = Adam(model.parameters(), lr=train_lr)
         
         self.step = 0
 
         self.device = device
 
-        assert not fp16 or fp16 and APEX_AVAILABLE, 'Apex must be installed in order for mixed precision training to be turned on'
-
-        self.fp16 = fp16
-        if fp16:
-            (self.model, self.ema_model), self.opt = amp.initialize([self.model, self.ema_model], self.opt, opt_level='O1')
-
         self.results_folder = Path(results_folder)
         self.results_folder.mkdir(exist_ok = True, parents=True)
-
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        self.ema_model.load_state_dict(self.model.state_dict())
-
-    def step_ema(self):
-        if self.step < self.step_start_ema:
-            self.reset_parameters()
-            return
-        self.ema.update_model_average(self.ema_model, self.model)
 
     def save(self, loss):
         data = {
             'step': self.step,
             'model': self.model.state_dict(),
-            'ema': self.ema_model.state_dict(),
             'loss': loss,
         }
         torch.save(data, str(self.results_folder / f'model.pt'))
@@ -618,80 +504,69 @@ class TrainerDDPM(object):
 
         self.step = data['step']
         self.model.load_state_dict(data['model'])
-        self.ema_model.load_state_dict(data['ema'])
 
     def train(self):
-        backwards = partial(loss_backwards, self.fp16)
 
         avg_loss = [0,]
 
         while self.step < self.train_num_steps:
 
-            for imgs, labels in self.train_loader:
+            for _, imgs in self.train_loader:
                 x=imgs.to(self.device)
-                y = None if self.model_type == 'unc' else labels.to(self.device)
-                loss = self.model(x,y)
-                backwards(loss / self.gradient_accumulate_every, self.opt)
+                
+                self.opt.zero_grad()
+                
+                loss = self.model(x)
+                loss.backward()
+                
                 if self.step != 0 and self.step % self.save_loss_every == 0:
                     avg_loss[-1] /= self.save_loss_every
-                    print(f'Step: {self.step} - Loss: {avg_loss[-1]:.3f}')
+                    print(f'Step: {self.step} - Loss: {avg_loss[-1]:.6f}')
                     avg_loss.append(0)
 
                 avg_loss[-1] += loss.item()
 
                 self.opt.step()
-                self.opt.zero_grad()
-
-                if self.step % self.update_ema_every == 0:
-                    self.step_ema()
 
                 if self.step != 0 and self.step % self.save_and_sample_every == 0:
-                    imgs, labels = next(iter(self.valid_loader))
-                    x_val=imgs.to(self.device)
-                    y_val = None if self.model_type == 'unc' else labels.to(self.device)
+                    _, imgs = next(iter(self.valid_loader))
+                    x_val=imgs[:,-1].to(self.device)
+                    x_val = x_val if len(x_val.shape) == 4 else x_val[:,None]
                     milestone = self.step // self.save_and_sample_every
                     n_images_to_sample = 25 
                     batches = num_to_groups(n_images_to_sample, self.batch_size) 
-                    all_images_list = list(map(lambda n: self.ema_model.sample(y_val if y_val == None else y_val[:n], batch_size=n), batches))    
-                    all_images = torch.clip(torch.cat(all_images_list, dim=0),0.,1.)
+                    all_images_list = list(map(lambda n: self.model.sample(x_val[:n], batch_size=n), batches))    
+                    all_images = torch.cat(all_images_list, dim=0)
                     # all_images = (all_images + 1.)*0.5
                     self.save_grid(all_images, str(self.results_folder / f'{milestone:03d}-train-pred.png'), nrow = 5)
                     self.save(avg_loss)
-                    if self.model_type == 'c':
-                        if len(y.shape) == 1:
-                            self.save_with_1Dlabels(milestone, y_val, mode='train') 
-                        else:
-                            self.save_with_2Dlabels(milestone, x_val, batches, mode='train', var_type='original')
-                            self.save_with_2Dlabels(milestone, y_val if y_val.shape[1]!= 2 else y_val[:,0][:,None], batches, mode='train', var_type='condition')
+                    self.save_with_2Dlabels(milestone, imgs[:,-1][:,None], batches, mode='train', var_type='step_0')
+                    self.save_with_2Dlabels(milestone, imgs[:,0][:,None], batches, mode='train', var_type='step_target')
 
                 self.step += 1
 
         print('training completed')
 
     def test(self):
-        imgs, labels = next(iter(self.valid_loader))
-        x=imgs.to(self.device)
-        y = None if self.model_type == 'unc' else labels.to(self.device)
+        _, imgs = next(iter(self.valid_loader))
+        x=imgs[:,-1].to(self.device)
         
         milestone = self.step // self.save_and_sample_every
         n_images_to_sample = 25 
         batches = num_to_groups(n_images_to_sample, self.batch_size) 
         
         #Save Output
-        all_images_list = list(map(lambda n: self.ema_model.sample(y if y == None else y[:n], batch_size=n), batches))
+        all_images_list = list(map(lambda n: self.model.sample(x[:n], batch_size=n), batches))
         all_images = torch.cat(all_images_list, dim=0)
         # all_images = (all_images + 1) * 0.5
         self.save_grid(all_images, str(self.results_folder / f'{milestone:03d}-test-pred.png'), nrow = 5)
 
-        if self.model_type == 'c':
-            if len(y.shape) == 1:
-                self.save_with_1Dlabels(milestone, y, mode='test') 
-            else:
-                self.save_with_2Dlabels(milestone, x, batches, mode='test', var_type='original')
-                self.save_with_2Dlabels(milestone, y, batches, mode='test', var_type='condition')
-            self.step += 1
+        self.save_with_2Dlabels(milestone, imgs[:,-1][:,None], batches, mode='test', var_type='step_0')
+        self.save_with_2Dlabels(milestone, imgs[:,0][:,None], batches, mode='test', var_type='step_target')
+        self.step += 1
             
             
+    """TODO: Write GIFs and Entropy for GBM"""
     def GIFs(self, gif_type = 'sampling'):
         """Generate GIFs"""
         
