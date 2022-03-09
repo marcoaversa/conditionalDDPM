@@ -22,9 +22,9 @@ def import_dataset(data_name: str = 'MNIST', batch_size: int = 32, image_size: i
                    sum_from: int = 0, sum_to: int = 50, import_timeseries = False, 
                    sum_every_n_steps: int = 5, force_download: bool = False):
     if data_name == 'MNIST':
-        train_loader, valid_loader, image_size, channels, dim_mults = import_mnist(batch_size, image_size)
+        train_loader, valid_loader, image_size, channels, dim_mults = import_mnist(batch_size)
     elif data_name == 'CIFAR10':
-        train_loader, valid_loader, image_size, channels, dim_mults = import_cifar10(batch_size, image_size)
+        train_loader, valid_loader, image_size, channels, dim_mults = import_cifar10(batch_size)
     elif data_name == 'speckles':
         train_loader, valid_loader, image_size, channels, dim_mults = import_speckles(sum_from = sum_from, sum_to = sum_to, 
                                                                                       batch_size = batch_size, image_size = image_size,
@@ -48,24 +48,26 @@ def import_dataset(data_name: str = 'MNIST', batch_size: int = 32, image_size: i
 
     return train_loader, valid_loader, image_size, channels, dim_mults
 
-def import_mnist(batch_size: int = 32, image_size: int = 28):
+def import_mnist(batch_size: int = 32):
     data_name = 'MNIST'
     data_path = './data'
     mu = (0.131,)
     sigma = (0.308,)
     channels=1
     dim_mults=(1,2,4)
+    image_size=28
     train_set, valid_set = import_from_torchvision(data_name, data_path, mu, sigma)
     train_loader, valid_loader = set_dataloaders(train_set, valid_set, batch_size)
     return train_loader, valid_loader, image_size, channels, dim_mults
 
-def import_mnist_blurred(batch_size: int = 32, image_size: int = 28):
+def import_mnist_blurred(batch_size: int = 32):
     data_name = 'MNIST_blurred'
     data_path = './data'
     mu = (0.131,)
     sigma = (0.308,)
     channels=1
     dim_mults=(1,2,4)
+    image_size=28
     train_set, valid_set = import_from_torchvision(data_name, data_path, mu, sigma)
     train_set = [(img, F.gaussian_blur(img, 11, (4.0, 4.0))) for (img,label) in train_set]
     valid_set = [(img, F.gaussian_blur(img, 11, (4.0, 4.0))) for (img,label) in valid_set]
@@ -73,13 +75,14 @@ def import_mnist_blurred(batch_size: int = 32, image_size: int = 28):
     return train_loader, valid_loader, image_size, channels, dim_mults
 
 
-def import_cifar10(batch_size: int = 32, image_size: int = 32):
+def import_cifar10(batch_size: int = 32):
     data_name = 'CIFAR10'
     data_path = os.path.join('./data', data_name)
     mu = (0.49139968, 0.48215827 , 0.44653124) 
     sigma = (0.24703233, 0.24348505, 0.26158768)
     channels=3
     dim_mults=(1,2,4,8)
+    image_size=32
     train_set, valid_set = import_from_torchvision(data_name, data_path, mu, sigma)
     train_loader, valid_loader = set_dataloaders(train_set, valid_set, batch_size)
     return train_loader, valid_loader, image_size, channels, dim_mults
@@ -135,14 +138,15 @@ def detect_sequence(data_path: str = './data/light_sheets', image_size: int = 12
 #     img_ref = CenterCrop(400)(img_ref)
     img_ref = GaussianBlur(5, sigma=(5.0, 5.0))(img_ref)
 
-    zs,xs,p = [4,],[0,],[1,]
-    for pos in range(2,50):
+    zs,xs,p,energy = [4,],[0,],[1,], [img_ref.mean(),]
+    for pos in range(2,18):
         z_close, x_close = 0,1
         loss = 10000
         for z in range(np.clip(4*pos-2,0,None), 4*pos+2):
             img_path = os.path.join(data_path,f'./Pos{pos:02d}/img_channel000_position{pos:03d}_time000000000_z{z:03d}.tif')
             img = Tensor(tiff.imread(img_path).astype(np.int32))[None,None]    
-            img = torch.clip(img.clone()-BG,0,None)
+            img = torch.clip(img.clone()-BG,0,None) 
+            energy.append(img.mean())
             img = norm(img)
 #             img = CenterCrop(400)(img)
             img = GaussianBlur(5, sigma=(5.0, 5.0))(img)
@@ -152,12 +156,12 @@ def detect_sequence(data_path: str = './data/light_sheets', image_size: int = 12
                 if temp < loss:
                     loss = temp
                     z_close = z
-                    x_close = shift                        
+                    x_close = shift    
 
         if not not zs and (z_close < zs[-1] or x_close < xs[-1] or image_size > img.shape[-1]-x_close):
             break
             
-        print(f'Position {pos} --> z_shift {z_close} x_shift {x_close}')
+        print(f'Position {pos} --> z_shift {z_close} x_shift {x_close} energy {energy[-1]:.2f}')
 
         zs.append(z_close)
         xs.append(x_close)
@@ -250,7 +254,7 @@ def import_ls(mode: str = 'full', batch_size: int = 32, image_size: int = 128, f
                     tiles = tile_multichannel_images(x, image_size)
                     X = torch.cat([X, tiles])
             X = X[1:]        
-            Y = X[:,0][:,None]
+            Y = X[0][None]
             
             # Permute images
             b=torch.randperm(len(X))
@@ -277,14 +281,11 @@ def import_ls(mode: str = 'full', batch_size: int = 32, image_size: int = 128, f
         Y = torch.load(os.path.join(data_path, f'Y_{mode}_{image_size}.pt'))
         
     train_size = int(len(X)*0.8)
-    print(train_size)
     
     mu,sigma = (X[:train_size].mean().item(),), (X[:train_size].std().item(),)
 
-    train_transform, test_transform = set_transforms(mu,sigma)
-
-    train_set = LightSheetsDataset( (Y[:train_size], X[:train_size]), transform=train_transform)
-    valid_set = LightSheetsDataset( (Y[train_size:], X[train_size:]), transform=test_transform)
+    train_set = LightSheetsDataset( (Y[:train_size], X[:train_size]), mode=mode)
+    valid_set = LightSheetsDataset( (Y[train_size:], X[train_size:]), mode=mode)
     train_loader, valid_loader = set_dataloaders(train_set, valid_set, batch_size)
     print('Light Sheet data imported!')
     return train_loader, valid_loader, image_size, channels, dim_mults
@@ -327,9 +328,9 @@ def set_transforms(
         
     train_transform = transforms.Compose([
             transforms.ToTensor(),
-            transforms.RandomRotation(90),
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomVerticalFlip(),
+#             transforms.RandomRotation(90),
+#             transforms.RandomHorizontalFlip(),
+#             transforms.RandomVerticalFlip(),
             transforms.Normalize(mu, sigma)
             ]) 
 
@@ -341,8 +342,8 @@ def set_transforms(
     return train_transform, test_transform
 
 def set_dataloaders(train_set, valid_set, batch_size: int = 32):
-    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
-    valid_loader = DataLoader(valid_set, batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=16)
+    valid_loader = DataLoader(valid_set, batch_size=batch_size, shuffle=False, num_workers=16)
     return train_loader, valid_loader
 
 class SpeckleDataset(Dataset):
@@ -384,21 +385,31 @@ class SpeckleDataset(Dataset):
             
 class LightSheetsDataset(Dataset):
     """TensorDataset with support of transforms."""
-    def __init__(self, tensors, transform=None):
+    def __init__(self, tensors, mode:str = 'seq', transform=None):
         assert all(tensors[0].shape[0] == tensor.shape[0] for tensor in tensors)
         self.tensors = tensors
         self.transform = transform
+        self.mode = mode
 
     def __getitem__(self, index):
         x = self.tensors[0][index]
         y = self.tensors[1][index]        
-        
-        if self.transform:
-            x = (x-x.min())/(x.max()-x.min())
-            if y.shape[0] == 2:
-                y[0] = (y[0]-y[0].min())/(y[0].max()-y[0].min())
-            else:
-                y = (y-y.min())/(y.max()-y.min())
+       
+        if self.mode == 'seq':
+            energy = y[0,0].mean()
+            y /= energy
+            gt_min = y[0,0].min()
+            gt_max = y[0,0].max()
+            y = torch.clip(y-gt_min,0,None)/(gt_max-gt_min)
+            x = y[:,0]
+#             index=torch.randint(0,len(y[0])-1,(1,)).item()
+#             y = y[:,index]
+#         if self.transform:
+#             x = (x-x.min())/(x.max()-x.min())
+#             if y.shape[0] == 2:
+#                 y[0] = (y[0]-y[0].min())/(y[0].max()-y[0].min())
+#             else:
+#                 y = (y-y.min())/(y.max()-y.min())
                
 #             x = self.transform(x)
 #             y = self.transform(y)
