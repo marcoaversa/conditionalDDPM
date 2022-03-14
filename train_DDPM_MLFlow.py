@@ -41,14 +41,12 @@ parser.add_argument('--dataset', type=str, default='MNIST', choices=('MNIST',
                                                                      'light_sheets_seq'), help='Choose the dataset')
 parser.add_argument('--dataset_path', type=str, default='./data', help='Choose the dataset path')
 parser.add_argument('--image_size', type=int, default=28, help='Select input image size')
-parser.add_argument('--save_sample_every', type=int, default=1000, help='Save and Sample after 1000 steps')
+parser.add_argument('--seq_random', type=int, default=0, help='Only for the light sheets dataset, select a random diffused image in the sequence (True) or the most diffuse one (False)')
 
 # Mode
 parser.add_argument('--mode', type=str, default='train', choices=('train','test'), help='Select mode')
 parser.add_argument('--model_type', type=str, default='c', 
                         choices=('unc','c'), help='Select model type')
-
-# Dataset Info
 
 
 # Train Mode args
@@ -70,7 +68,10 @@ mlflow.set_experiment(args.experiment_name)
 
 # Define Dataset
 
-train_loader, valid_loader, image_size, channels, dim_mults = import_dataset(args.dataset, args.batch_size, args.image_size)
+train_loader, valid_loader, image_size, channels, dim_mults = import_dataset(data_name = args.dataset, 
+                                                                             batch_size = args.batch_size, 
+                                                                             image_size = args.image_size, 
+                                                                             seq_random = args.seq_random)
 
 condition_dim = 2 if args.dataset == 'light_sheets_full' else 1
 
@@ -100,10 +101,6 @@ model = LitModelDDPM(
                 )
 
 if args.mode == 'train':
-#     with mlflow.start_run(run_name=args.run_name) as run:
-#     for key in list(args.__dict__.keys()):
-#         mlflow.log_param(key, getattr(args, key))
-
     mlf_logger = MLFlowLogger(tracking_uri=args.tracking_uri,
                               experiment_name=args.experiment_name, 
                               run_name=args.run_name
@@ -112,14 +109,13 @@ if args.mode == 'train':
     run_id = mlf_logger.run_id
 
     for key in list(args.__dict__.keys()):
-#             mlflow.log_param(key, getattr(args, key))
         mlf_logger.experiment.log_param(run_id=run_id, key=key, value=getattr(args, key))
 
     trainer = Trainer(
                      enable_checkpointing=False,
                      logger=mlf_logger,
                      max_steps = args.train_num_steps,
-                     val_check_interval = args.save_sample_every,
+                     limit_val_batches=1,
                      log_every_n_steps=50,
                      gpus=1 if args.device == 'cuda' else 0)
 
@@ -128,11 +124,3 @@ if args.mode == 'train':
         train_dataloaders=train_loader,
         val_dataloaders=valid_loader,
     )
-
-#         display_mlflow_run_info(run)
-
-#         trainer.train(run)
-
-if args.mode == 'test':
-    trainer.load()
-    trainer.test()

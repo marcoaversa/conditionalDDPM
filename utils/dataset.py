@@ -20,7 +20,7 @@ import tifffile as tiff
     
 def import_dataset(data_name: str = 'MNIST', batch_size: int = 32, image_size: int = 28,
                    sum_from: int = 0, sum_to: int = 50, import_timeseries = False, 
-                   sum_every_n_steps: int = 5, force_download: bool = False):
+                   sum_every_n_steps: int = 5, seq_random: bool = True, force_download: bool = False):
     if data_name == 'MNIST':
         train_loader, valid_loader, image_size, channels, dim_mults = import_mnist(batch_size)
     elif data_name == 'CIFAR10':
@@ -44,6 +44,7 @@ def import_dataset(data_name: str = 'MNIST', batch_size: int = 32, image_size: i
         train_loader, valid_loader, image_size, channels, dim_mults = import_ls(mode = 'seq', 
                                                                                 batch_size = batch_size, 
                                                                                 image_size = image_size,
+                                                                                seq_random = seq_random,
                                                                                 force_download = force_download)
 
     return train_loader, valid_loader, image_size, channels, dim_mults
@@ -171,7 +172,7 @@ def detect_sequence(data_path: str = './data/light_sheets', image_size: int = 12
     return p, zs, xs
 
 
-def import_ls(mode: str = 'full', batch_size: int = 32, image_size: int = 128, force_download: bool = False):
+def import_ls(mode: str = 'full', batch_size: int = 32, image_size: int = 128, seq_random: bool = True,force_download: bool = False):
     """Lightsheets dataset
        
        Args:
@@ -292,8 +293,8 @@ def import_ls(mode: str = 'full', batch_size: int = 32, image_size: int = 128, f
     
     mu,sigma = (X[:train_size].mean().item(),), (X[:train_size].std().item(),)
 
-    train_set = LightSheetsDataset( (Y[:train_size], X[:train_size]), mode=mode)
-    valid_set = LightSheetsDataset( (Y[train_size:], X[train_size:]), mode=mode)
+    train_set = LightSheetsDataset( (Y[:train_size], X[:train_size]), mode=mode, seq_random=seq_random)
+    valid_set = LightSheetsDataset( (Y[train_size:], X[train_size:]), mode=mode, seq_random=seq_random)
     train_loader, valid_loader = set_dataloaders(train_set, valid_set, batch_size)
     print('Light Sheet data imported!')
     return train_loader, valid_loader, image_size, channels, dim_mults
@@ -393,11 +394,12 @@ class SpeckleDataset(Dataset):
             
 class LightSheetsDataset(Dataset):
     """TensorDataset with support of transforms."""
-    def __init__(self, tensors, mode:str = 'seq', transform=None):
+    def __init__(self, tensors, mode:str = 'seq', seq_random: bool = True, transform=None):
         assert all(tensors[0].shape[0] == tensor.shape[0] for tensor in tensors)
         self.tensors = tensors
         self.transform = transform
         self.mode = mode
+        self.seq_random = seq_random 
 
     def __getitem__(self, index):
         x = self.tensors[0][index]
@@ -412,9 +414,11 @@ class LightSheetsDataset(Dataset):
             y = torch.clip(y-gt_min,0,None)/(gt_max-gt_min)
             
             x = y[:,0]
-            index=torch.randint(0,len(y[0])-1,(1,)).item()
-            y = y[:,index]
-#             y = y[:,-1]
+            if self.seq_random:
+                index=torch.randint(0,len(y[0])-1,(1,)).item()
+                y = y[:,index]
+            else:
+                y = y[:,-1]
             
 #         if self.transform:
 #             x = (x-x.min())/(x.max()-x.min())

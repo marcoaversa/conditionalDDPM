@@ -407,7 +407,8 @@ class GaussianDiffusion(nn.Module):
     def p_sample_loop(self, y, shape):
         b,_,h,w = shape
         img = torch.randn(shape, device=self.device)
-        for i in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
+#         for i in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
+        for i in reversed(range(0, self.num_timesteps)):
             if self.mode == 'c':
                 if len(y.shape) == 1: # Labels 1D
                     y = self.label_reshaping(y, b, h, w, self.device)   
@@ -491,9 +492,6 @@ class LitModelDDPM(pl.LightningModule):
         self.batch_size = batch_size
         self.lr = lr
         
-        self.milestone=0
-        self.flag=0
-
     def forward(self, x):        
         return self.model.sample(x)
     
@@ -518,36 +516,34 @@ class LitModelDDPM(pl.LightningModule):
     
     def validation_step(self, batch, batch_nb):
         
-        if self.flag==0:
-            x, y = self.set_batch(batch)
-            n_images_to_sample = 9
+        x, y = self.set_batch(batch)
+        n_images_to_sample = 9
 
-            all_images = self.model.sample(y if y == None else y[:9], batch_size=9)  
-            self.save_grid(all_images, f'/nfs/conditionalDDPM/tmp/{self.milestone:03d}-train-pred.png', nrow = 3)
-            self.logger.experiment.log_artifact(run_id = self.logger.run_id,
-                                                local_path=f'/nfs/conditionalDDPM/tmp/{self.milestone:03d}-train-pred.png', 
-                                                artifact_path='training')
-            
-            if self.model_type == 'c':
-                if len(y.shape) == 1:
-                    self.save_with_1Dlabels(y, mode='train') 
-                else:
-                    self.save_with_2Dlabels(x, mode='train', var_type='target', n_row=3)
-                    self.save_with_2Dlabels(y if y.shape[1]!= 2 else y[:,0][:,None], 
-                                            mode='train', var_type='input', n_row=3)
-            
+        all_images = self.model.sample(y if y == None else y[:9], batch_size=9)  
+        self.save_grid(all_images, f'/nfs/conditionalDDPM/tmp/{self.global_step:05d}-train-pred.png', nrow = 3)
+        self.logger.experiment.log_artifact(run_id = self.logger.run_id,
+                                            local_path=f'/nfs/conditionalDDPM/tmp/{self.global_step:05d}-train-pred.png', 
+                                            artifact_path='training')
 
-            torch.save(self.model.state_dict(), f'/nfs/conditionalDDPM/tmp/model.pt')
-            self.logger.experiment.log_artifact(run_id = self.logger.run_id,
-                                                        local_path=f'/nfs/conditionalDDPM/tmp/model.pt', 
-                                                        artifact_path=None)
-            self.milestone+=1
-            self.flag=1
+        if self.model_type == 'c':
+            if len(y.shape) == 1:
+                self.save_with_1Dlabels(y, mode='train') 
+            else:
+                self.save_with_2Dlabels(x, mode='train', var_type='target', n_row=3)
+                self.save_with_2Dlabels(y if y.shape[1]!= 2 else y[:,0][:,None], 
+                                        mode='train', var_type='input', n_row=3)
+
+
+        torch.save(self.model.state_dict(), f'/nfs/conditionalDDPM/tmp/model.pt')
+        self.logger.experiment.log_artifact(run_id = self.logger.run_id,
+                                                    local_path=f'/nfs/conditionalDDPM/tmp/model.pt', 
+                                                    artifact_path=None)
+#             self.flag=1
             
-            """TODO: Add Condition and Original, Add also GIF!!"""
+        """TODO: Add also GIF!!"""
         
-    def validation_epoch_end(self, validation_step_outputs):
-        self.flag=0
+#     def validation_epoch_end(self, validation_step_outputs):
+#         self.flag=0
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.model.parameters(), lr=self.lr)
@@ -569,9 +565,9 @@ class LitModelDDPM(pl.LightningModule):
         plt.savefig(file_name)
         
     def save_with_1Dlabels(self, y, mode):
-        writing_mode = 'w' if self.milestone == 0 else 'a+'
+        writing_mode = 'w' if os.path.exists(f'/nfs/conditionalDDPM/tmp/labels-{mode}.txt') else 'a+'
         with open(f'/nfs/conditionalDDPM/tmp/labels-{mode}.txt', writing_mode) as file:
-            file.write(f"sample-{self.milestone}: ")
+            file.write(f"sample-{self.global_step}: ")
             for element in y:
                 file.write(str(element.item()) + " ")
             file.write("\n")
@@ -585,9 +581,9 @@ class LitModelDDPM(pl.LightningModule):
 #         imgs_stacked = list(map(lambda n: imgs[:n], self.batch_size))
 #         imgs_stacked = torch.cat(imgs_stacked, dim=0)
         imgs_stacked = imgs[:n_row**2]
-        self.save_grid(imgs_stacked, f'/nfs/conditionalDDPM/tmp/{self.milestone:03d}-{mode}-{var_type}.png', nrow = n_row)
+        self.save_grid(imgs_stacked, f'/nfs/conditionalDDPM/tmp/{self.global_step:05d}-{mode}-{var_type}.png', nrow = n_row)
         self.logger.experiment.log_artifact(run_id = self.logger.run_id,
-                                            local_path=f'/nfs/conditionalDDPM/tmp/{self.milestone:03d}-{mode}-{var_type}.png', 
+                                            local_path=f'/nfs/conditionalDDPM/tmp/{self.global_step:05d}-{mode}-{var_type}.png', 
                                             artifact_path='training')
             
     def GIFs(self, val_batch, gif_type = 'sampling'):
