@@ -491,7 +491,7 @@ class LitModelDDPM(pl.LightningModule):
         self.batch_size = batch_size
         self.lr = lr
         
-        self.milestone=1
+        self.milestone=0
         self.flag=0
 
     def forward(self, x):        
@@ -500,16 +500,6 @@ class LitModelDDPM(pl.LightningModule):
     def set_batch(self,batch):
         x,y = batch
         return x, None if self.model_type == 'unc' else y
-                          
-    def save_grid(self, images, file_name, nrow=5):
-                
-        grid = utils.make_grid(images, nrow=nrow)
-        plt.figure()
-        if images.shape[1] == 1:
-            plt.imshow(grid[0].cpu().detach())
-        else:
-            plt.imshow(grid.permute((1,2,0)).cpu().detach())
-        plt.savefig(file_name)
         
     def training_step(self, batch, batch_nb):
         x, y = self.set_batch(batch)
@@ -530,13 +520,22 @@ class LitModelDDPM(pl.LightningModule):
         
         if self.flag==0:
             x, y = self.set_batch(batch)
-            n_images_to_sample = 9 
+            n_images_to_sample = 9
 
             all_images = self.model.sample(y if y == None else y[:9], batch_size=9)  
             self.save_grid(all_images, f'/nfs/conditionalDDPM/tmp/{self.milestone:03d}-train-pred.png', nrow = 3)
             self.logger.experiment.log_artifact(run_id = self.logger.run_id,
                                                 local_path=f'/nfs/conditionalDDPM/tmp/{self.milestone:03d}-train-pred.png', 
                                                 artifact_path='training')
+            
+            if self.model_type == 'c':
+                if len(y.shape) == 1:
+                    self.save_with_1Dlabels(y, mode='train') 
+                else:
+                    self.save_with_2Dlabels(x, mode='train', var_type='target', n_row=3)
+                    self.save_with_2Dlabels(y if y.shape[1]!= 2 else y[:,0][:,None], 
+                                            mode='train', var_type='input', n_row=3)
+            
 
             torch.save(self.model.state_dict(), f'/nfs/conditionalDDPM/tmp/model.pt')
             self.logger.experiment.log_artifact(run_id = self.logger.run_id,
@@ -553,7 +552,44 @@ class LitModelDDPM(pl.LightningModule):
     def configure_optimizers(self):
         return torch.optim.Adam(self.model.parameters(), lr=self.lr)
                             
-                            
+           
+    def save_grid(self, images, file_name, nrow=3):
+                
+            
+        vmin=images.min()
+        vmax=images.max()
+        
+        grid = utils.make_grid(images, nrow=nrow)
+        plt.figure()
+        if images.shape[1] == 1:
+            plt.imshow(grid[0].cpu().detach())
+        else:
+            plt.imshow(grid.permute((1,2,0)).cpu().detach())
+        plt.colorbar()
+        plt.savefig(file_name)
+        
+    def save_with_1Dlabels(self, y, mode):
+        writing_mode = 'w' if self.milestone == 0 else 'a+'
+        with open(f'/nfs/conditionalDDPM/tmp/labels-{mode}.txt', writing_mode) as file:
+            file.write(f"sample-{self.milestone}: ")
+            for element in y:
+                file.write(str(element.item()) + " ")
+            file.write("\n")
+        
+        self.logger.experiment.log_artifact(run_id = self.logger.run_id,
+                                            local_path=f'/nfs/conditionalDDPM/tmp/labels-{mode}.txt', 
+                                            artifact_path='training')
+
+    def save_with_2Dlabels(self, imgs, mode, var_type, n_row=3):
+        
+#         imgs_stacked = list(map(lambda n: imgs[:n], self.batch_size))
+#         imgs_stacked = torch.cat(imgs_stacked, dim=0)
+        imgs_stacked = imgs[:n_row**2]
+        self.save_grid(imgs_stacked, f'/nfs/conditionalDDPM/tmp/{self.milestone:03d}-{mode}-{var_type}.png', nrow = n_row)
+        self.logger.experiment.log_artifact(run_id = self.logger.run_id,
+                                            local_path=f'/nfs/conditionalDDPM/tmp/{self.milestone:03d}-{mode}-{var_type}.png', 
+                                            artifact_path='training')
+            
     def GIFs(self, val_batch, gif_type = 'sampling'):
         """Generate GIFs"""
         
@@ -600,140 +636,3 @@ class LitModelDDPM(pl.LightningModule):
                         y = self.model.label_reshaping(y, b, h, w, model.device)   
                     img = self.model.label_concatenate(img,y)
                 img = self.model.p_sample(img, torch.full((b,), i, dtype=torch.long, device=model.device))   
-
-# class TrainerDDPM(object):
-#     def __init__(
-#         self,
-#         diffusion_model,
-#         train_loader,
-#         valid_loader,
-#         *,
-#         model_type = 'unc',
-#         train_batch_size = 32,
-#         train_lr = 2e-5,
-#         train_num_steps = 100000,
-#         gradient_accumulate_every = 2,
-#         save_and_sample_every = 1000,
-#         results_folder = './logs',
-#         device = 'cuda'
-#     ):
-#         super().__init__()
-        
-#         self.model = diffusion_model        
-#         self.model_type = model_type
-
-#         self.save_and_sample_every = save_and_sample_every
-#         self.save_loss_every = 50
-
-#         self.batch_size = train_batch_size
-#         self.image_size = diffusion_model.image_size
-#         self.gradient_accumulate_every = gradient_accumulate_every
-#         self.train_num_steps = train_num_steps
-
-#         self.train_loader = train_loader
-#         self.valid_loader = valid_loader
-#         self.opt = Adam(diffusion_model.parameters(), lr=train_lr)
-        
-#         self.step = 0
-
-#         self.device = device
-        
-        
-#     def save_grid(self, images, file_name, nrow=5):
-                
-#         grid = utils.make_grid(images, nrow=nrow)
-#         plt.figure()
-#         if images.shape[1] == 1:
-#             plt.imshow(grid[0].cpu().detach())
-#         else:
-#             plt.imshow(grid.permute((1,2,0)).cpu().detach())
-#         plt.savefig(file_name)
-        
-
-#     def train(self):
-#         avg_loss = [0,]
-
-#         while self.step < self.train_num_steps:
-
-#             for imgs, labels in self.train_loader:
-#                 x=imgs.to(self.device)
-#                 y = None if self.model_type == 'unc' else labels.to(self.device)
-#                 loss = self.model(x,y)
-#                 backwards(loss / self.gradient_accumulate_every, self.opt)
-#                 if self.step != 0 and self.step % self.save_loss_every == 0:
-#                     avg_loss[-1] /= self.save_loss_every
-#                     print(f'Step: {self.step} - Loss: {avg_loss[-1]:.3f}')
-#                     avg_loss.append(0)
-
-#                 avg_loss[-1] += loss.item()
-
-#                 self.opt.step()
-#                 self.opt.zero_grad()
-
-#                 if self.step != 0 and self.step % self.save_and_sample_every == 0:
-#                     imgs, labels = next(iter(self.valid_loader))
-#                     x_val=imgs.to(self.device)
-#                     y_val = None if self.model_type == 'unc' else labels.to(self.device)
-#                     milestone = self.step // self.save_and_sample_every
-#                     n_images_to_sample = 9 
-#                     all_images_list = self.model.sample(y_val if y_val == None else y_val[:n], batch_size=n)  
-#                     all_images = torch.clip(torch.cat(all_images_list, dim=0),0.,1.)
-#                     self.save_grid(all_images, str('tmp' / f'{milestone:03d}-train-pred.png'), nrow = 3)
-#                     mlflow.log_artifact(str('tmp' / f'{milestone:03d}-train-pred.png', 'training') 
-#                     mlflow.pytorch.log_model(model, artifact_path=None)
-#                     mlflow.log_metric(key='loss', value=avg_loss[-1], step=self.step)
-#                 self.step += 1
-#         self.GIFs('sampling')
-#         self.GIFs('histo')
-#         mlflow.log_artifact(str('tmp' / 'sampling.gif', 'training') 
-#         mlflow.log_artifact(str('tmp' / 'histo.gif', 'training') 
-#         print('training completed')
-
-#     def GIFs(self, gif_type = 'sampling'):
-#         """Generate GIFs"""
-        
-#         assert gif_type in ('sampling','histo'), 'gif_type should be one of (sampling,histo)'
-        
-#         model = self.ema_model
-        
-#         imgs, labels = next(iter(self.valid_loader))
-#         y = None if model.mode == 'unc' else labels.to(model.device)
-#         y = y[:25]
-            
-#         shape = (25, model.channels, model.image_size, model.image_size)
-        
-#         print(f'Generating {gif_type} GIF')
-            
-#         b,_,h,w = shape
-#         img = torch.randn(shape, device=model.device)
-        
-#         with imageio.get_writer(str('tmp' / f'{gif_type}.gif'), mode='I',fps=30) as writer:
-#             for i in tqdm(reversed(range(0, model.num_timesteps)), desc='sampling loop time step', total=model.num_timesteps):
-
-#                 if gif_type == 'sampling':
-#                     grid = np.array(utils.make_grid(img, nrow=5).permute((1,2,0)).cpu().detach())
-#     #                 to_save = np.array(img[0].squeeze().detach().cpu()).copy()
-#                     writer.append_data((np.clip(grid*255, 0, 255).astype(np.uint8)))
-
-#                 elif gif_type == 'histo':
-#                     # https://stackoverflow.com/questions/5320677/how-to-normalize-a-histogram-in-matlab
-#                     # Remark: bin_width < 1 --> p(x) can be higher than 1. The important thing is that the Area is 1.
-#                     # The Probability to have a value x is equal to p(x)*bin_width
-#                     hist,bin_edges = np.histogram(np.array(img.flatten().cpu().detach()), bins=30, range=(-2.0,2.0))
-#                     dx = bin_edges[1]-bin_edges[0]
-#                     plt.figure()
-#                     plt.scatter((bin_edges[:-1]+bin_edges[1:])/2, hist/(dx*hist.sum())) 
-#     #                 print(dx*(hist/(dx*hist.sum())).sum()) # Check Area = 1
-#                     plt.ylim(0.,1.0)
-#                     plt.xlabel('x')
-#                     plt.ylabel('pdf(x)')
-#                     plt.savefig('./tmp/test.png')
-#                     plt.close()
-#                     npimage = imageio.imread('./logs/test.png')
-#                     writer.append_data(npimage)
-#                     os.remove('./tmp/test.png')
-#                 if self.model_type == 'c':
-#                     if len(y.shape) == 1: # Labels 1D
-#                         y = model.label_reshaping(y, b, h, w, model.device)   
-#                     img = model.label_concatenate(img,y)
-#                 img = model.p_sample(img, torch.full((b,), i, dtype=torch.long, device=model.device))   

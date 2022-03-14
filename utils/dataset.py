@@ -123,22 +123,21 @@ def import_speckles(sum_from: int = 0, sum_to: int = 10, batch_size: int = 32,
     return train_loader, valid_loader, image_size, channels, dim_mults
 
 
-def detect_sequence(data_path: str = './data/light_sheets', image_size: int = 128):
+def detect_sequence(data_path: str = './data/light_sheets', image_size: int = 128, BG: int = 443):
     """Detect Light sheets sequence along z_stack during shift"""
     
     loss_fn = lambda x,y: torch.sqrt(((x-y)**2).mean())
     norm = lambda img: (img-img.min())/(img.max()-img.min())
 
-    BG = 443
-
     img_ref_path = os.path.join(data_path,f'./Pos{1:02d}/img_channel000_position{1:03d}_time000000000_z{4:03d}.tif')
     img_ref = Tensor(tiff.imread(img_ref_path).astype(np.int32))[None,None]    
     img_ref = torch.clip(img_ref-BG,0,None)
+    energy = [img_ref.mean(),]
     img_ref = norm(img_ref)
 #     img_ref = CenterCrop(400)(img_ref)
     img_ref = GaussianBlur(5, sigma=(5.0, 5.0))(img_ref)
 
-    zs,xs,p,energy = [4,],[0,],[1,], [img_ref.mean(),]
+    zs,xs,p = [4,],[0,],[1,]
     for pos in range(2,18):
         z_close, x_close = 0,1
         loss = 10000
@@ -146,7 +145,8 @@ def detect_sequence(data_path: str = './data/light_sheets', image_size: int = 12
             img_path = os.path.join(data_path,f'./Pos{pos:02d}/img_channel000_position{pos:03d}_time000000000_z{z:03d}.tif')
             img = Tensor(tiff.imread(img_path).astype(np.int32))[None,None]    
             img = torch.clip(img.clone()-BG,0,None) 
-            energy.append(img.mean())
+            energy_temp = img.mean()
+#             energy.append(img.mean())
             img = norm(img)
 #             img = CenterCrop(400)(img)
             img = GaussianBlur(5, sigma=(5.0, 5.0))(img)
@@ -158,7 +158,7 @@ def detect_sequence(data_path: str = './data/light_sheets', image_size: int = 12
                     z_close = z
                     x_close = shift    
 
-        if not not zs and (z_close < zs[-1] or x_close < xs[-1] or image_size > img.shape[-1]-x_close):
+        if z_close < zs[-1] or x_close < xs[-1] or image_size > img.shape[-1]-x_close:
             break
             
         print(f'Position {pos} --> z_shift {z_close} x_shift {x_close} energy {energy[-1]:.2f}')
@@ -166,6 +166,7 @@ def detect_sequence(data_path: str = './data/light_sheets', image_size: int = 12
         zs.append(z_close)
         xs.append(x_close)
         p.append(pos)
+        energy.append(energy_temp)
         
     return p, zs, xs
 
@@ -186,12 +187,17 @@ def import_ls(mode: str = 'full', batch_size: int = 32, image_size: int = 128, f
     
     if not os.path.exists(os.path.join(data_path, f'X_{mode}_{image_size}.pt')) or force_download:
     
-        positions, z_stacks, x_shifts = detect_sequence(image_size = image_size)
+        if os.path.exists(os.path.join(data_path, f'X_{mode}_{image_size}.pt')):
+            os.remove(os.path.join(data_path, f'X_{mode}_{image_size}.pt'))
+        if os.path.exists(os.path.join(data_path, f'Y_{mode}_{image_size}.pt')):
+            os.remove(os.path.join(data_path, f'Y_{mode}_{image_size}.pt'))
+
+        positions, z_stacks, x_shifts = detect_sequence(image_size = image_size, BG = BG)
 
         seq, delta_zs=[],[]
         for i in range(101-max(z_stacks)):
             names = [f'./Pos{p:02d}/img_channel000_position{p:03d}_time000000000_z{z_stacks[j]+i:03d}.tif' for j,p in enumerate(positions)]
-            seq.append([Tensor(tiff.imread(os.path.join(data_path, name)).astype(np.int32))-BG for name in names])
+            seq.append([torch.clip(Tensor(tiff.imread(os.path.join(data_path, name)).astype(np.int32))-BG,0,None) for name in names])
             delta_zs.append([z_stacks[j]+i - z_stacks[0] for j,p in enumerate(positions[1:])])
 
         n_shifts = len(positions)
@@ -244,30 +250,32 @@ def import_ls(mode: str = 'full', batch_size: int = 32, image_size: int = 128, f
         elif mode == 'seq':
             seq = [torch.stack(s) for s in seq] 
             Y = [x[0] for x in seq]
-                     
+
             seq = torch.stack(seq)
             b,c,*_ = seq.shape
-            X = torch.zeros((1,c,image_size,image_size))
-            for x in tqdm(seq):
+            tiles=[]
+            for x in tqdm(seq): 
                 x = torch.stack([img[:,(x_shifts[-1]-x_shifts[n]):-x_shifts[n]] if n>0 else img[:,x_shifts[-1]:] for n,img in enumerate(x)])
                 for n in range(n_shifts-1):
-                    tiles = tile_multichannel_images(x, image_size)
-                    X = torch.cat([X, tiles])
-            X = X[1:]        
-            Y = X[0][None]
-            
+                    tiles.append(tile_multichannel_images(x, image_size))
+
+            X = torch.cat(tiles)
+            X = X[:,1:]        
+            Y = X[:,0][:,None]
+
             # Permute images
-            b=torch.randperm(len(X))
-            X = X[b, None]
-            Y = Y[b, None]
-    
-        
+            indices=torch.randperm(len(X))
+            X = X[indices, None]
+            Y = Y[indices, None]
+
+
+        print('Saving Tiles')
         # Remove noisy images
         means = Tensor([img.mean().item() for img in Y])
         indices = means > noise_threshold
         Y = Y[indices]
         X = X[indices]
-            
+
         torch.save(X, os.path.join(data_path, f'X_{mode}_{image_size}.pt'))
         torch.save(Y, os.path.join(data_path, f'Y_{mode}_{image_size}.pt'))
 #         with open(os.path.join(data_path, f"deltaZ_{image_size}.txt"), "w") as f:
@@ -342,8 +350,8 @@ def set_transforms(
     return train_transform, test_transform
 
 def set_dataloaders(train_set, valid_set, batch_size: int = 32):
-    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=16)
-    valid_loader = DataLoader(valid_set, batch_size=batch_size, shuffle=False, num_workers=16)
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
+    valid_loader = DataLoader(valid_set, batch_size=batch_size, shuffle=False)
     return train_loader, valid_loader
 
 class SpeckleDataset(Dataset):
@@ -396,14 +404,18 @@ class LightSheetsDataset(Dataset):
         y = self.tensors[1][index]        
        
         if self.mode == 'seq':
-            energy = y[0,0].mean()
+            
+            energy = y[0,0].mean()# --> y_shape = (1,N_sequences,H,W)
             y /= energy
             gt_min = y[0,0].min()
             gt_max = y[0,0].max()
             y = torch.clip(y-gt_min,0,None)/(gt_max-gt_min)
+            
             x = y[:,0]
-#             index=torch.randint(0,len(y[0])-1,(1,)).item()
-#             y = y[:,index]
+            index=torch.randint(0,len(y[0])-1,(1,)).item()
+            y = y[:,index]
+#             y = y[:,-1]
+            
 #         if self.transform:
 #             x = (x-x.min())/(x.max()-x.min())
 #             if y.shape[0] == 2:

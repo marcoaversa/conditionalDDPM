@@ -3,6 +3,7 @@
 data
 logs
 results
+tmp
 # templates
 
 nohup.out
