@@ -4,7 +4,7 @@ data
 logs
 results
 tmp
-# templates
+templates
 
 nohup.out
 

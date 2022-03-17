@@ -17,10 +17,13 @@ from torchvision.transforms import GaussianBlur, CenterCrop
 
 import tifffile as tiff
 
+import pyjetraw4ai_proto as jetraw4ai
+
     
 def import_dataset(data_name: str = 'MNIST', batch_size: int = 32, image_size: int = 28,
                    sum_from: int = 0, sum_to: int = 50, import_timeseries = False, 
-                   sum_every_n_steps: int = 5, seq_random: bool = True, force_download: bool = False):
+                   sum_every_n_steps: int = 5, seq_random: bool = True, seq_full: bool = False,
+                   force_download: bool = False):
     if data_name == 'MNIST':
         train_loader, valid_loader, image_size, channels, dim_mults = import_mnist(batch_size)
     elif data_name == 'CIFAR10':
@@ -30,23 +33,16 @@ def import_dataset(data_name: str = 'MNIST', batch_size: int = 32, image_size: i
                                                                                       batch_size = batch_size, image_size = image_size,
                                                                                       import_timeseries = import_timeseries, 
                                                                                       sum_every_n_steps = sum_every_n_steps)
-    elif data_name == 'light_sheets_full':
-        train_loader, valid_loader, image_size, channels, dim_mults = import_ls(mode = 'full', 
-                                                                                batch_size = batch_size, 
-                                                                                image_size = image_size,
-                                                                                force_download = force_download)
-    elif data_name == 'light_sheets_ae':
-        train_loader, valid_loader, image_size, channels, dim_mults = import_ls(mode = 'ae', 
-                                                                                batch_size = batch_size, 
-                                                                                image_size = image_size,
-                                                                                force_download = force_download)
-    elif data_name == 'light_sheets_seq':
-        train_loader, valid_loader, image_size, channels, dim_mults = import_ls(mode = 'seq', 
+    
+    if data_name.startswith('light_sheets'):
+        mode = data_name.split('_')[-1]
+        train_loader, valid_loader, image_size, channels, dim_mults = import_ls(mode = mode, 
                                                                                 batch_size = batch_size, 
                                                                                 image_size = image_size,
                                                                                 seq_random = seq_random,
+                                                                                seq_full = seq_full,
                                                                                 force_download = force_download)
-
+        
     return train_loader, valid_loader, image_size, channels, dim_mults
 
 def import_mnist(batch_size: int = 32):
@@ -172,7 +168,8 @@ def detect_sequence(data_path: str = './data/light_sheets', image_size: int = 12
     return p, zs, xs
 
 
-def import_ls(mode: str = 'full', batch_size: int = 32, image_size: int = 128, seq_random: bool = True,force_download: bool = False):
+def import_ls(mode: str = 'seq', batch_size: int = 32, image_size: int = 128, 
+              seq_random: bool = True, seq_full: bool = False, force_download: bool = False):
     """Lightsheets dataset
        
        Args:
@@ -198,7 +195,7 @@ def import_ls(mode: str = 'full', batch_size: int = 32, image_size: int = 128, s
         seq, delta_zs=[],[]
         for i in range(101-max(z_stacks)):
             names = [f'./Pos{p:02d}/img_channel000_position{p:03d}_time000000000_z{z_stacks[j]+i:03d}.tif' for j,p in enumerate(positions)]
-            seq.append([torch.clip(Tensor(tiff.imread(os.path.join(data_path, name)).astype(np.int32))-BG,0,None) for name in names])
+            seq.append([torch.clip(Tensor(tiff.imread(os.path.join(data_path, name)).astype(np.int16))-BG,0,None) for name in names])
             delta_zs.append([z_stacks[j]+i - z_stacks[0] for j,p in enumerate(positions[1:])])
 
         n_shifts = len(positions)
@@ -206,69 +203,46 @@ def import_ls(mode: str = 'full', batch_size: int = 32, image_size: int = 128, s
         X, Y, Delta_Z= [], [], []
                         
         print('\nTiling images')
-        
-        if mode == 'full' or mode == 'ae':
-            for i in tqdm(range(101-max(z_stacks))):
-                for n in range(n_shifts-1):
-                    x_image = torch.clip(seq[i][n+1], 0, None)
-                    tiles_x = tile_image(x_image[:,:-x_shifts[n+1]], image_size)
-                    X.append(tiles_x)
-
-                    y_image = torch.clip(seq[i][0], 0, None)
-                    tiles_y = tile_image(y_image[:,x_shifts[n+1]:], image_size)
-                    Y.append(tiles_y)  
-
-                    Delta_Z.append([delta_zs[i][n] for j in range(len(tiles_x))])
-                    
-            if mode == 'full':
-                Z=[]
-                for stack in Delta_Z:
-                    Z += stack
-
-                Z = [torch.ones((image_size,image_size))*z for z in Z]
-
-                X = torch.cat(X)
-                Y = torch.cat(Y)
-                Z = torch.stack(Z)
-
-                # Permute images
-                b=torch.randperm(len(X))
-                X = torch.cat([X[b, None], Z[b,None]], dim=1)
-                Y = Y[b, None] 
-        #         Z = Tensor(Z)[b].tolist()
-
-            elif mode == 'ae':
-
-                X = torch.cat(X)
-                Y = torch.cat(Y)
-                X = torch.cat([X,Y])
-
-                # Permute images
-                b=torch.randperm(len(X))
-                X = X[b, None]
-                Y = X
                 
-        elif mode == 'seq':
-            seq = [torch.stack(s) for s in seq] 
-            Y = [x[0] for x in seq]
+        seq = [torch.stack(s) for s in seq] 
+        Y = [x[0] for x in seq]
 
-            seq = torch.stack(seq)
-            b,c,*_ = seq.shape
-            tiles=[]
-            for x in tqdm(seq): 
-                x = torch.stack([img[:,(x_shifts[-1]-x_shifts[n]):-x_shifts[n]] if n>0 else img[:,x_shifts[-1]:] for n,img in enumerate(x)])
-                for n in range(n_shifts-1):
-                    tiles.append(tile_multichannel_images(x, image_size))
+        seq = torch.stack(seq)
+        b,c,*_ = seq.shape
+        tiles=[]
+        for x in tqdm(seq): 
+            x = torch.stack([img[:,(x_shifts[-1]-x_shifts[n]):-x_shifts[n]] if n>0 else img[:,x_shifts[-1]:] for n,img in enumerate(x)])
+            for n in range(n_shifts-1):
+                tiles.append(tile_multichannel_images(x, image_size))
 
-            X = torch.cat(tiles)
-            X = X[:,1:]        
-            Y = X[:,0][:,None]
+        X = torch.cat(tiles)
 
-            # Permute images
-            indices=torch.randperm(len(X))
-            X = X[indices, None]
-            Y = Y[indices, None]
+#         if mode == 'DPSeqDarkening':
+#             for i in range(1,X.shape[1]):
+#                 factor = X[:,i].mean()/X[:,0].mean()
+#                 print(f'Decreasing Intensity Step {i} --> Scaling factor = {factor:.2f}')
+#                 X[:,i] = decrease_intensity(X[:,0].clone(), I_scale.item())
+        
+#         if mode == 'DPSeqDiffuse':
+#             N_steps = 1000
+#             ref_img = X[:,0].clone()
+#             X = torch.zeros((X.shape[0],N_steps,X.shape[1],X.shape[2]))
+#             for i in torch.linspace(100, 29000, N_steps):
+#                 factor = int(i)
+#                 print(f'Diffusing Step {i} --> Scaling factor = {factor}')
+#                 X[:,i] = diffusion(X[:,0].clone(), factor)
 
+#         if mode == 'ae':      
+#             Y = X
+#         else:
+        X = X[:,1:]        
+        Y = X[:,0][:,None]
+            
+
+        # Permute images
+        indices=torch.randperm(len(X))
+        X = X[indices, None]
+        Y = Y[indices, None] # Y.shape = (B,C,Steps,H,W)
 
         print('Saving Tiles')
         # Remove noisy images
@@ -277,8 +251,8 @@ def import_ls(mode: str = 'full', batch_size: int = 32, image_size: int = 128, s
         Y = Y[indices]
         X = X[indices]
 
-        torch.save(X, os.path.join(data_path, f'X_{mode}_{image_size}.pt'))
-        torch.save(Y, os.path.join(data_path, f'Y_{mode}_{image_size}.pt'))
+        torch.save(X, os.path.join(data_path, f'X_{image_size}.pt'))
+        torch.save(Y, os.path.join(data_path, f'Y_{image_size}.pt'))
 #         with open(os.path.join(data_path, f"deltaZ_{image_size}.txt"), "w") as f:
 #             for element in Z:
 #                 f.write(f'{int(element)}\n')
@@ -291,15 +265,88 @@ def import_ls(mode: str = 'full', batch_size: int = 32, image_size: int = 128, s
         
     train_size = int(len(X)*0.8)
     
-    mu,sigma = (X[:train_size].mean().item(),), (X[:train_size].std().item(),)
+    def energy_norm(x):
+        energy = x.mean()# --> x.shape = (C,H,W)
+        x /= energy
+        x_min = x.min()
+        x_max = x.max()
+        return torch.clip(x - x_min,0,None)/(x_max-x_min)-0.5
+    
+    transform = transforms.Compose([energy_norm,])
 
-    train_set = LightSheetsDataset( (Y[:train_size], X[:train_size]), mode=mode, seq_random=seq_random)
-    valid_set = LightSheetsDataset( (Y[train_size:], X[train_size:]), mode=mode, seq_random=seq_random)
+    train_set = LightSheetsDataset( (Y[:train_size], X[:train_size]), mode=mode, 
+                                    seq_random=seq_random, seq_full=seq_full, transform=transform)
+    valid_set = LightSheetsDataset( (Y[train_size:], X[train_size:]), mode=mode, 
+                                    seq_random=seq_random, seq_full=seq_full, transform=transform)
     train_loader, valid_loader = set_dataloaders(train_set, valid_set, batch_size)
     print('Light Sheet data imported!')
     return train_loader, valid_loader, image_size, channels, dim_mults
 
 
+def decrease_intensity(
+                imgs, 
+                factor: float =  1., 
+                B: float = 99.6, 
+                G: float = 2.2, 
+                N: float = 3., 
+                W: float = 2**16-1):
+    """
+    Rescale the intensity of a raw image.
+    REMARK: In the figure (B == c, G == z, N ==  sigma, W == max_value)
+
+    Args:
+        img (torch.Tensor,numpy.array): raw image
+        factor (float): percentage of intensity rescaling, range (0.,1.]
+        B (float): Black level
+        G (float): Gain
+        N (float): Standard deviation
+        W (int): White Level
+
+    Return:
+        img_rescaled (torch.Tensor): Rescaled RGGB image    
+    """
+
+    assert factor <= 1. or factor > 0., 'Intensity scale factor should be in the range (0.,1.]'
+    assert imgs.ndim == 3, 'Input image should be in the raw pattern format (B,H,W)'
+    if isinstance(imgs, torch.Tensor):
+        imgs = np.array(imgs).astype(np.float64)
+        
+    if I_scale < 1.:
+        
+        params = jetraw4ai.Parameters(G,B,N,W)
+
+        for i, img in tqdm(enumerate(imgs)):
+            im_scaled = jetraw4ai.JetrawImage(img, params)
+            imgs[i] = im_scaled.scale_exposure(factor).image_data
+
+    return torch.Tensor(imgs)            
+
+def diffusion(
+        imgs, 
+        factor: int =  1., 
+        B: float = 99.6, 
+        G: float = 2.2, 
+        N: float = 3., 
+        W: float = 2**16-1):
+    
+    
+    assert factor <= 29400 or factor > 0, 'Intensity scale factor should be in the range (0.,29400.]'
+    assert imgs.ndim == 3, 'Input image should be in the raw pattern format (B,H,W)'
+    if isinstance(imgs, torch.Tensor):
+        imgs = np.array(imgs).astype(np.float64)
+    
+    params = jetraw4ai.Parameters(G,B,N,W)
+
+    for i, img in tqdm(enumerate(imgs)):
+        jetraw_img = jetraw4ai.JetrawImage(img, params)
+        el_repr = jetraw_img.electron_repr()
+        el_repr.image_data += factor
+        diffused_img = el_repr.replace_noise().digital_repr().image_data
+        ratio = diffused_img.mean()/img.mean()
+        diffused_img /= ratio
+        imgs[i] = diffused_img
+    return torch.Tensor(imgs)
+        
 def tile_image(image, image_size):
     """Image shape (H,W)"""
     return image.unfold(0,image_size,image_size).unfold(1,image_size,image_size).reshape(-1,image_size,image_size)
@@ -364,12 +411,12 @@ class SpeckleDataset(Dataset):
         self.size = size
 
     def __getitem__(self, index):
-        x = self.tensors[0][index]
-        y = self.tensors[1][index]        
+        x = self.tensors[0][index].clone()
+        y = self.tensors[1][index].clone()
         
         if self.transform:
             x = self.transform(x)
-            y = Tensor(y)
+            y = Tensor(y).clone()
             y = (y-y.min())/(y.max()-y.min())
             
         x = self.upsample_img(x)
@@ -394,42 +441,39 @@ class SpeckleDataset(Dataset):
             
 class LightSheetsDataset(Dataset):
     """TensorDataset with support of transforms."""
-    def __init__(self, tensors, mode:str = 'seq', seq_random: bool = True, transform=None):
+    def __init__(self, 
+                 tensors, 
+                 mode:str = 'seq', 
+                 seq_random: bool = True, 
+                 seq_full: bool = False, 
+                 transform=None):
         assert all(tensors[0].shape[0] == tensor.shape[0] for tensor in tensors)
         self.tensors = tensors
         self.transform = transform
         self.mode = mode
         self.seq_random = seq_random 
+        self.seq_full = seq_full 
 
     def __getitem__(self, index):
-        x = self.tensors[0][index]
-        y = self.tensors[1][index]        
-       
-        if self.mode == 'seq':
-            
-            energy = y[0,0].mean()# --> y_shape = (1,N_sequences,H,W)
-            y /= energy
-            gt_min = y[0,0].min()
-            gt_max = y[0,0].max()
-            y = torch.clip(y-gt_min,0,None)/(gt_max-gt_min)
-            
-            x = y[:,0]
+        x = self.tensors[0][index].clone()
+        y = self.tensors[1][index].clone()
+    
+        if not self.seq_full:
+            x = x[:,0]
             if self.seq_random:
-                index=torch.randint(0,len(y[0])-1,(1,)).item()
+                index=torch.randint(0,len(Y[0])-1,(1,)).item()
                 y = y[:,index]
             else:
                 y = y[:,-1]
             
-#         if self.transform:
-#             x = (x-x.min())/(x.max()-x.min())
-#             if y.shape[0] == 2:
-#                 y[0] = (y[0]-y[0].min())/(y[0].max()-y[0].min())
-#             else:
-#                 y = (y-y.min())/(y.max()-y.min())
-               
-#             x = self.transform(x)
-#             y = self.transform(y)
-
+        if self.transform:
+            x = self.transform(x)
+            if self.seq_full:
+                for i in range(y.shape[1]):
+                    y[:,i] = self.transform(y[:,i])
+            else:
+                y = self.transform(y)
+            
         x = x.type(torch.FloatTensor)        
         y = y.type(torch.FloatTensor)
 
@@ -440,305 +484,3 @@ class LightSheetsDataset(Dataset):
 
 if __name__=='__main__':        
     train_loader, valid_loader = import_dataset(args)
-
-
-# def import_light_sheets(batch_size: int = 32):
-    
-#     data_path = './data/light_sheets'
-#     image_size=128
-#     channels = 1
-#     dim_mults = (1,2,4)
-    
-#     imgs=[]
-#     for i in reversed(range(1,46)):
-#         imgs.append(Tensor(np.load(os.path.join(data_path, f'pos{i}_ims.npz'))['arr_0']))
-#     Y = imgs[0][:,:,:128].unfold(1, 128, 128).reshape(-1,128,128)[:,None].repeat(43,1,1,1) # shape: (392,1,128,128)
-#     imgs.pop(0) # discard gt from the imgs list
-#     imgs = [img[:,:,i*20:(128+i*20)].unfold(1, 128, 128).reshape(-1,128,128) for i, img in enumerate(imgs)]   
-#     imgs.pop(5) # discard pos39 image (not well acquired)
-    
-#     X = imgs[0]
-#     imgs.pop(0)
-#     for img in imgs:
-#         X = torch.cat((X,img), dim = 0) 
-#     X = X[:, None] # X final shape: (16856, 128, 128)
-        
-#     train_size = int(len(X)*0.8)
-    
-#     mu,sigma = (X[:train_size].mean().item(),), (X[:train_size].std().item(),)
-
-#     train_transform, test_transform = set_transforms(mu,sigma)
-
-#     train_set = LightSheetsDataset( (Y[:train_size], X[:train_size]), transform=train_transform)
-#     valid_set = LightSheetsDataset( (Y[train_size:], X[train_size:]), transform=test_transform)
-#     train_loader, valid_loader = set_dataloaders(train_set, valid_set, batch_size)
-#     return train_loader, valid_loader, image_size, channels, dim_mults
-
-# def import_light_sheets2(batch_size: int = 32, image_size: int = 128):
-    
-#     data_path = './data/light_sheets'
-#     channels = 1
-#     dim_mults = (1,2,4)
-#     shift = 20
-    
-#     test_image = np.load(os.path.join(data_path, f'pos1_ims.npz'))['arr_0']
-#     c,h,w = test_image.shape
-#     n_shifts = (w//shift - image_size//shift) # max number of position that we can have to shift the left-hand side to the right-hand side
-# #     n_pos = n_shifts if n_shifts <= 38 else 38 # 39th shift has bad quality
-# #     n_pos = 2 # 2 positions are enough --> 35k images 128x128
-#     n_pos = 3 # 15k images 256x256
-    
-#     if not os.path.exists(os.path.join(data_path, f'X_shifts_{n_pos}_imgsize_{image_size}.pt')):
-#         imgs=[]
-#         for i in range(1,n_pos+2):
-#             imgs.append(Tensor(np.load(os.path.join(data_path, f'pos{i}_ims.npz'))['arr_0']))
-
-#         # Image clearer on the left and noiser on the right
-#         # Data collected with a shift on the left
-#         X = imgs[:-1]
-#         Y = imgs[1:]
-
-#         _,_,w = X[0].shape
-
-#         Xs, Ys= [], []
-#         for j in range(len(X)):
-#             print(f'\nElaborate image position {j+1}/{n_pos}')
-#             for n in range(n_shifts):
-#                 sys.stdout.write(f'\r Slice N: {n+1}/{n_shifts}')
-#                 sys.stdout.flush()
-#                 Xs.append(X[j][:,:,n*shift:(image_size+n*shift)].unfold(1, image_size, image_size).reshape(-1,image_size,image_size))
-#                 Ys.append(Y[j][:,:,n*shift:(image_size+n*shift)].unfold(1, image_size, image_size).reshape(-1,image_size,image_size))
-
-#         X = Xs[0]
-#         print('\nStacking X tiles')
-#         for img in tqdm(Xs):
-#             X = torch.cat((X,img), dim = 0) 
-#         X = X[:, None] 
-#         torch.save(X, os.path.join(data_path, f'X_shifts_{n_pos}_imgsize_{image_size}.pt'))
-
-#         Y = Ys[0]
-#         print('\nStacking Y tiles')
-#         for img in tqdm(Ys):
-#             Y = torch.cat((Y,img), dim = 0) 
-#         Y = Y[:, None] 
-#         torch.save(Y, os.path.join(data_path, f'Y_shifts_{n_pos}_imgsize_{image_size}.pt'))
-        
-#         print(f"\nDataset containes {len(X)} tiles")
-        
-#     else:
-#         print("Loading Dataset")
-#         X = torch.load(os.path.join(data_path, f'X_shifts_{n_pos}_imgsize_{image_size}.pt'))
-#         Y = torch.load(os.path.join(data_path, f'Y_shifts_{n_pos}_imgsize_{image_size}.pt'))
-        
-#     train_size = int(len(X)*0.8)
-#     print(train_size)
-    
-#     mu,sigma = (X[:train_size].mean().item(),), (X[:train_size].std().item(),)
-
-#     train_transform, test_transform = set_transforms(mu,sigma)
-
-#     train_set = LightSheetsDataset( (Y[:train_size], X[:train_size]), transform=train_transform)
-#     valid_set = LightSheetsDataset( (Y[train_size:], X[train_size:]), transform=test_transform)
-#     train_loader, valid_loader = set_dataloaders(train_set, valid_set, batch_size)
-#     print('Light Sheet data imported!')
-#     return train_loader, valid_loader, image_size, channels, dim_mults
-
-# def import_light_sheets3(batch_size: int = 32, image_size: int = 128):
-    
-#     data_path = './data/light_sheets'
-#     channels = 1
-#     dim_mults = (1,2,4)
-#     shift = 40
-    
-#     test_image = tiff.imread(os.path.join(data_path, f'Pos00/img_channel000_position000_time000000000_z000.tif'))
-#     h,w = test_image.shape
-#     n_shifts = (w//shift - image_size//shift) # max number of position that we can have to shift the left-hand side to the right-hand side
-# #     n_pos = n_shifts if n_shifts <= 38 else 38 # 39th shift has bad quality
-# #     n_pos = 2 # 2 positions are enough --> 35k images 128x128
-#     n_pos = 1 # 15k images 256x256
-    
-#     # After 10 micron shift, the focus of the light sheet goes deep in the sample. 
-#     # It means that the ground truth is at d = 10*tg(pi/2) = 10 micron
-#     # In the z-stack, the sample moves deeper 2.0 micron every step --> around 5 images later we have the gt
-#     z_shift = 5
-    
-#     if not os.path.exists(os.path.join(data_path, f'X_shifts_{n_pos}_imgsize_{image_size}.pt')):
-    
-#         Xs, Ys= [], []
-#         print('\nTiling images')
-#         for n in range(n_pos):
-#             dir_X = os.path.join(data_path, f'Pos{n+1:02d}')
-#             dir_Y = os.path.join(data_path, f'Pos{n:02d}')
-#             X,Y=[],[]
-#             for i in range(101):
-#                 x_image = tiff.imread(os.path.join(dir_X, f'img_channel000_position{n+1:03d}_time000000000_z{i:03d}.tif'))
-#                 y_image = tiff.imread(os.path.join(dir_Y, f'img_channel000_position{n:03d}_time000000000_z{i:03d}.tif'))
-#                 X.append(Tensor(x_image.astype(np.int32)))
-#                 Y.append(Tensor(y_image.astype(np.int32)))
-
-#             X = X[:-z_shift]
-#             Y = Y[z_shift:]
-
-#             h,w = x_image.shape
-
-#             for j in range(len(X)):
-# #                 print(f'\nElaborate Z images N {j+1}/{101}')
-#                 for n in range(n_shifts):
-# #                     sys.stdout.write(f'\r Slice N: {n+1}/{n_shifts}')
-# #                     sys.stdout.flush()
-#                     Xs.append(tile_image(X[j][:,n*shift:(image_size+n*shift)], image_size))
-#                     Ys.append(tile_image(Y[j][:,n*shift:(image_size+n*shift)], image_size))
-
-# #         Xs = [x if x.max for x in Xs]
-        
-#         X = torch.cat(Xs)
-#         Y = torch.cat(Ys)
-        
-#         b=torch.randperm(len(X))
-#         X = X[b, None] 
-#         Y = Y[b, None] 
-        
-#         torch.save(X, os.path.join(data_path, f'X_shifts_{n_pos}_imgsize_{image_size}.pt'))
-#         torch.save(Y, os.path.join(data_path, f'Y_shifts_{n_pos}_imgsize_{image_size}.pt'))
-#         print(f"\nDataset containes {len(X)} tiles")
-        
-#     else:
-#         print("Loading Dataset")
-#         X = torch.load(os.path.join(data_path, f'X_shifts_{n_pos}_imgsize_{image_size}.pt'))
-#         Y = torch.load(os.path.join(data_path, f'Y_shifts_{n_pos}_imgsize_{image_size}.pt'))
-        
-#     train_size = int(len(X)*0.8)
-#     print(train_size)
-    
-#     mu,sigma = (X[:train_size].mean().item(),), (X[:train_size].std().item(),)
-
-#     train_transform, test_transform = set_transforms(mu,sigma)
-
-#     train_set = LightSheetsDataset( (Y[:train_size], X[:train_size]), transform=train_transform)
-#     valid_set = LightSheetsDataset( (Y[train_size:], X[train_size:]), transform=test_transform)
-#     train_loader, valid_loader = set_dataloaders(train_set, valid_set, batch_size)
-#     print('Light Sheet data imported!')
-#     return train_loader, valid_loader, image_size, channels, dim_mults
-
-# def import_light_sheets_sequential(batch_size: int = 32, image_size: int = 128):
-    
-#     data_path = './data/light_sheets'
-#     channels = 1
-#     dim_mults = (1,2,4)
-    
-#     positions =   [ 1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14]
-#     z_stacks =    [ 4, 11, 14, 18, 20, 24, 28, 30, 34, 38, 40, 45, 49, 54]
-#     x_shifts =    [ 0, 54, 38, 35, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30]
-    
-#     images=[]
-#     for i in range(4,101-max(z_stacks)):
-#             names = [f'./Pos{p:02d}/img_channel000_position{p:03d}_time000000000_z{z_stacks[j]+i:03d}.tif' for j,p in enumerate(positions)]
-#             images.append([tiff.imread(os.path.join(data_path, name)) for name in names])
-    
-#     n_shifts = len(positions)
-    
-#     if not os.path.exists(os.path.join(data_path, f'X_shifts_seq_imgsize_{image_size}.pt')):
-    
-#         X, Y= [], []
-        
-#         print('\nTiling images')
-#         for i in range(101-max(z_stacks)-4):
-#             for n in range(n_shifts-1):
-#                 x_image = Tensor(images[i][n+1].astype(np.int32))
-#                 tiles_x = tile_image(x_image[:,:-x_shifts[n+1]], image_size)
-#                 X.append(tiles_x)
-
-#                 y_image = Tensor(images[i][n].astype(np.int32))
-#                 tiles_y = tile_image(y_image[:,x_shifts[n+1]:], image_size)
-#                 Y.append(tiles_y)
-
-#         X = torch.cat(X)
-#         Y = torch.cat(Y)
-        
-#         b=torch.randperm(len(X))
-#         X = X[b, None] 
-#         Y = Y[b, None] 
-        
-#         torch.save(X, os.path.join(data_path, f'X_shifts_seq_imgsize_{image_size}.pt'))
-#         torch.save(Y, os.path.join(data_path, f'Y_shifts_seq_imgsize_{image_size}.pt'))
-#         print(f"\nDataset containes {len(X)} tiles")
-        
-#     else:
-#         print("Loading Dataset")
-#         X = torch.load(os.path.join(data_path, f'X_shifts_seq_imgsize_{image_size}.pt'))
-#         Y = torch.load(os.path.join(data_path, f'Y_shifts_seq_imgsize_{image_size}.pt'))
-        
-#     train_size = int(len(X)*0.8)
-#     print(train_size)
-    
-#     mu,sigma = (X[:train_size].mean().item(),), (X[:train_size].std().item(),)
-
-#     train_transform, test_transform = set_transforms(mu,sigma)
-
-#     train_set = LightSheetsDataset( (Y[:train_size], X[:train_size]), transform=train_transform)
-#     valid_set = LightSheetsDataset( (Y[train_size:], X[train_size:]), transform=test_transform)
-#     train_loader, valid_loader = set_dataloaders(train_set, valid_set, batch_size)
-#     print('Light Sheet data imported!')
-#     return train_loader, valid_loader, image_size, channels, dim_mults
-
-# def import_light_sheets_ae(batch_size: int = 32, image_size: int = 128):
-    
-#     data_path = './data/light_sheets'
-#     channels = 1
-#     dim_mults = (1,2,4)
-    
-#     positions =   [ 1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14]
-#     z_stacks =    [ 4, 11, 14, 18, 20, 24, 28, 30, 34, 38, 40, 45, 49, 54]
-#     x_shifts =    [ 0, 54, 38, 35, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30]
-    
-#     images=[]
-#     for i in range(4,101-max(z_stacks)):
-#             names = [f'./Pos{p:02d}/img_channel000_position{p:03d}_time000000000_z{z_stacks[j]+i:03d}.tif' for j,p in enumerate(positions)]
-#             images.append([tiff.imread(os.path.join(data_path, name)) for name in names])
-    
-#     n_shifts = len(positions)
-    
-#     if not os.path.exists(os.path.join(data_path, f'X_shifts_ae_imgsize_{image_size}.pt')):
-    
-#         X, Y= [], []
-        
-#         print('\nTiling images')
-#         for i in range(101-max(z_stacks)-4):
-#             for n in range(n_shifts-1):
-#                 x_image = Tensor(images[i][n+1].astype(np.int32))
-#                 tiles_x = tile_image(x_image[:,:-x_shifts[n+1]], image_size)
-#                 X.append(tiles_x)
-
-#                 y_image = Tensor(images[i][n].astype(np.int32))
-#                 tiles_y = tile_image(y_image[:,x_shifts[n+1]:], image_size)
-#                 Y.append(tiles_y)
-
-#         X = torch.cat(X)
-#         Y = torch.cat(Y)
-        
-#         b=torch.randperm(len(X))
-#         X = X[b, None] 
-#         Y = Y[b, None] 
-        
-#         torch.save(X, os.path.join(data_path, f'X_shifts_ae_imgsize_{image_size}.pt'))
-#         torch.save(Y, os.path.join(data_path, f'Y_shifts_ae_imgsize_{image_size}.pt'))
-#         print(f"\nDataset containes {len(X)} tiles")
-        
-#     else:
-#         print("Loading Dataset")
-#         X = torch.load(os.path.join(data_path, f'X_shifts_ae_imgsize_{image_size}.pt'))
-#         Y = torch.load(os.path.join(data_path, f'Y_shifts_ae_imgsize_{image_size}.pt'))
-        
-#     train_size = int(len(X)*0.8)
-#     print(train_size)
-    
-#     mu,sigma = (X[:train_size].mean().item(),), (X[:train_size].std().item(),)
-
-#     train_transform, test_transform = set_transforms(mu,sigma)
-
-#     train_set = LightSheetsDataset( (X[:train_size], X[:train_size]), transform=train_transform)
-#     valid_set = LightSheetsDataset( (X[train_size:], X[train_size:]), transform=test_transform)
-#     train_loader, valid_loader = set_dataloaders(train_set, valid_set, batch_size)
-#     print('Light Sheet data imported!')
-#     return train_loader, valid_loader, image_size, channels, dim_mults
-

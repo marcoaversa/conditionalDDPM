@@ -23,10 +23,6 @@ import numpy as np
 from tqdm import tqdm
 from einops import rearrange
 
-import mlflow
-
-import pytorch_lightning as pl
-
 try:
     from apex import amp
     APEX_AVAILABLE = True
@@ -64,6 +60,21 @@ def loss_backwards(fp16, loss, optimizer, **kwargs):
         loss.backward(**kwargs)
 
 # small helper modules
+
+class EMA():
+    def __init__(self, beta):
+        super().__init__()
+        self.beta = beta
+
+    def update_model_average(self, ma_model, current_model):
+        for current_params, ma_params in zip(current_model.parameters(), ma_model.parameters()):
+            old_weight, up_weight = ma_params.data, current_params.data
+            ma_params.data = self.update_average(old_weight, up_weight)
+
+    def update_average(self, old, new):
+        if old is None:
+            return new
+        return old * self.beta + (1 - self.beta) * new
 
 class Residual(nn.Module):
     def __init__(self, fn):
@@ -407,8 +418,7 @@ class GaussianDiffusion(nn.Module):
     def p_sample_loop(self, y, shape):
         b,_,h,w = shape
         img = torch.randn(shape, device=self.device)
-#         for i in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
-        for i in reversed(range(0, self.num_timesteps)):
+        for i in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
             if self.mode == 'c':
                 if len(y.shape) == 1: # Labels 1D
                     y = self.label_reshaping(y, b, h, w, self.device)   
@@ -474,139 +484,237 @@ class GaussianDiffusion(nn.Module):
                 y = self.label_reshaping(y, b, h, w, device)
         return self.p_losses(x, t, y, *args, **kwargs)
 
+
+# dataset classes
+
+class Dataset(data.Dataset):
+    def __init__(self, folder, image_size, exts = ['jpg', 'jpeg', 'png']):
+        super().__init__()
+        self.folder = folder
+        self.image_size = image_size
+        self.paths = [p for ext in exts for p in Path(f'{folder}').glob(f'**/*.{ext}')]
+
+        self.transform = transforms.Compose([
+            transforms.Resize(image_size),
+            transforms.RandomHorizontalFlip(),
+            transforms.CenterCrop(image_size),
+            transforms.ToTensor(),
+            transforms.Lambda(lambda t: (t * 2) - 1)
+        ])
+
+    def __len__(self):
+        return len(self.paths)
+
+    def __getitem__(self, index):
+        path = self.paths[index]
+        img = Image.open(path)
+        return self.transform(img)
+
 # trainer class
 
-class LitModelDDPM(pl.LightningModule):
+class TrainerDDPM(object):
     def __init__(
         self,
         diffusion_model,
+        train_loader,
+        valid_loader,
+        *,
         model_type = 'unc',
-        batch_size = 32,
-        lr = 2e-5
+        ema_decay = 0.995,
+        train_batch_size = 32,
+        train_lr = 2e-5,
+        train_num_steps = 100000,
+        gradient_accumulate_every = 2,
+        fp16 = False,
+        step_start_ema = 2000,
+        update_ema_every = 10,
+        save_and_sample_every = 1000,
+        results_folder = './logs',
+        device = 'cuda'
     ):
-        super(LitModelDDPM, self).__init__()
+        super().__init__()
         
         self.model = diffusion_model        
         self.model_type = model_type
+        self.ema = EMA(ema_decay)
+        self.ema_model = copy.deepcopy(self.model)
+        self.update_ema_every = update_ema_every
 
-        self.batch_size = batch_size
-        self.lr = lr
-        
-    def forward(self, x):        
-        return self.model.sample(x)
-    
-    def set_batch(self,batch):
-        x,y = batch
-        return x, None if self.model_type == 'unc' else y
-        
-    def training_step(self, batch, batch_nb):
-        x, y = self.set_batch(batch)
-        
-        loss = self.model(x,y)
-        
-        # Use the current of PyTorch logger
-#         self.log("train_loss", loss, on_epoch=True)
-#         self.log("loss", loss, logger=True)
-        self.logger.experiment.log_metric(run_id = self.logger.run_id,
-                                          key = 'loss', 
-                                          value = loss.item(),
-                                          step = self.global_step)
-    
-        return loss
-    
-    def validation_step(self, batch, batch_nb):
-        
-        x, y = self.set_batch(batch)
-        n_images_to_sample = 9
+        self.step_start_ema = step_start_ema
+        self.save_and_sample_every = save_and_sample_every
+        self.save_loss_every = 50
 
-        all_images = self.model.sample(y if y == None else y[:9], batch_size=9)  
-        self.save_grid(all_images, f'/nfs/conditionalDDPM/tmp/{self.global_step:05d}-train-pred.png', nrow = 3)
-        self.logger.experiment.log_artifact(run_id = self.logger.run_id,
-                                            local_path=f'/nfs/conditionalDDPM/tmp/{self.global_step:05d}-train-pred.png', 
-                                            artifact_path='training')
+        self.batch_size = train_batch_size
+        self.image_size = diffusion_model.image_size
+        self.gradient_accumulate_every = gradient_accumulate_every
+        self.train_num_steps = train_num_steps
 
-        if self.model_type == 'c':
-            if len(y.shape) == 1:
-                self.save_with_1Dlabels(y, mode='train') 
-            else:
-                self.save_with_2Dlabels(x, mode='train', var_type='target', n_row=3)
-                self.save_with_2Dlabels(y if y.shape[1]!= 2 else y[:,0][:,None], 
-                                        mode='train', var_type='input', n_row=3)
-
-
-        torch.save(self.model.state_dict(), f'/nfs/conditionalDDPM/tmp/model.pt')
-        self.logger.experiment.log_artifact(run_id = self.logger.run_id,
-                                                    local_path=f'/nfs/conditionalDDPM/tmp/model.pt', 
-                                                    artifact_path=None)
-#             self.flag=1
-            
-        """TODO: Add also GIF!!"""
+        self.train_loader = train_loader
+        self.valid_loader = valid_loader
+        self.opt = Adam(diffusion_model.parameters(), lr=train_lr)
         
-#     def validation_epoch_end(self, validation_step_outputs):
-#         self.flag=0
+        self.step = 0
 
-    def configure_optimizers(self):
-        return torch.optim.Adam(self.model.parameters(), lr=self.lr)
-                            
-           
-    def save_grid(self, images, file_name, nrow=3):
+        self.device = device
+
+        assert not fp16 or fp16 and APEX_AVAILABLE, 'Apex must be installed in order for mixed precision training to be turned on'
+
+        self.fp16 = fp16
+        if fp16:
+            (self.model, self.ema_model), self.opt = amp.initialize([self.model, self.ema_model], self.opt, opt_level='O1')
+
+        self.results_folder = Path(results_folder)
+        self.results_folder.mkdir(exist_ok = True, parents=True)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        self.ema_model.load_state_dict(self.model.state_dict())
+
+    def step_ema(self):
+        if self.step < self.step_start_ema:
+            self.reset_parameters()
+            return
+        self.ema.update_model_average(self.ema_model, self.model)
+
+    def save(self, loss):
+        data = {
+            'step': self.step,
+            'model': self.model.state_dict(),
+            'ema': self.ema_model.state_dict(),
+            'loss': loss,
+        }
+        torch.save(data, str(self.results_folder / f'model.pt'))
+        with open(str(self.results_folder / f'loss.txt'), 'w') as file:
+            for element in loss:
+                file.write(str(element) + "\n")
+
+    def save_with_1Dlabels(self, milestone, y, mode):
+        writing_mode = 'w' if milestone == 1 else 'a+'
+        with open(str(self.results_folder / f'labels-{mode}.txt'), writing_mode) as file:
+            file.write(f"sample-{milestone}: ")
+            for element in y:
+                file.write(str(element.item()) + " ")
+            file.write("\n")
+
+    def save_with_2Dlabels(self, milestone, imgs, batches, mode, var_type):
+        
+        imgs_stacked = list(map(lambda n: imgs[:n], batches))
+        imgs_stacked = torch.cat(imgs_stacked, dim=0)
+        self.save_grid(imgs_stacked, str(self.results_folder / f'{milestone:03d}-{mode}-{var_type}.png'))
+
+    def save_grid(self, images, file_name, nrow=5):
                 
-            
-        vmin=images.min()
-        vmax=images.max()
-        
         grid = utils.make_grid(images, nrow=nrow)
         plt.figure()
         if images.shape[1] == 1:
             plt.imshow(grid[0].cpu().detach())
         else:
             plt.imshow(grid.permute((1,2,0)).cpu().detach())
-        plt.colorbar()
         plt.savefig(file_name)
-        
-    def save_with_1Dlabels(self, y, mode):
-        writing_mode = 'w' if os.path.exists(f'/nfs/conditionalDDPM/tmp/labels-{mode}.txt') else 'a+'
-        with open(f'/nfs/conditionalDDPM/tmp/labels-{mode}.txt', writing_mode) as file:
-            file.write(f"sample-{self.global_step}: ")
-            for element in y:
-                file.write(str(element.item()) + " ")
-            file.write("\n")
-        
-        self.logger.experiment.log_artifact(run_id = self.logger.run_id,
-                                            local_path=f'/nfs/conditionalDDPM/tmp/labels-{mode}.txt', 
-                                            artifact_path='training')
 
-    def save_with_2Dlabels(self, imgs, mode, var_type, n_row=3):
+    def load(self):
+        data = torch.load(str(self.results_folder / f'model.pt'))
+
+        self.step = data['step']
+        self.model.load_state_dict(data['model'])
+        self.ema_model.load_state_dict(data['ema'])
+
+    def train(self):
+        backwards = partial(loss_backwards, self.fp16)
+
+        avg_loss = [0,]
+
+        while self.step < self.train_num_steps:
+
+            for imgs, labels in self.train_loader:
+                x=imgs.to(self.device)
+                y = None if self.model_type == 'unc' else labels.to(self.device)
+                loss = self.model(x,y)
+                backwards(loss / self.gradient_accumulate_every, self.opt)
+                if self.step != 0 and self.step % self.save_loss_every == 0:
+                    avg_loss[-1] /= self.save_loss_every
+                    print(f'Step: {self.step} - Loss: {avg_loss[-1]:.3f}')
+                    avg_loss.append(0)
+
+                avg_loss[-1] += loss.item()
+
+                self.opt.step()
+                self.opt.zero_grad()
+
+                if self.step % self.update_ema_every == 0:
+                    self.step_ema()
+
+                if self.step != 0 and self.step % self.save_and_sample_every == 0:
+                    imgs, labels = next(iter(self.valid_loader))
+                    x_val=imgs.to(self.device)
+                    y_val = None if self.model_type == 'unc' else labels.to(self.device)
+                    milestone = self.step // self.save_and_sample_every
+                    n_images_to_sample = 25 
+                    batches = num_to_groups(n_images_to_sample, self.batch_size) 
+                    all_images_list = list(map(lambda n: self.ema_model.sample(y_val if y_val == None else y_val[:n], batch_size=n), batches))    
+                    all_images = torch.clip(torch.cat(all_images_list, dim=0),0.,1.)
+                    # all_images = (all_images + 1.)*0.5
+                    self.save_grid(all_images, str(self.results_folder / f'{milestone:03d}-train-pred.png'), nrow = 5)
+                    self.save(avg_loss)
+                    if self.model_type == 'c':
+                        if len(y.shape) == 1:
+                            self.save_with_1Dlabels(milestone, y_val, mode='train') 
+                        else:
+                            self.save_with_2Dlabels(milestone, x_val, batches, mode='train', var_type='original')
+                            self.save_with_2Dlabels(milestone, y_val if y_val.shape[1]!= 2 else y_val[:,0][:,None], batches, mode='train', var_type='condition')
+
+                self.step += 1
+
+        print('training completed')
+
+    def test(self):
+        imgs, labels = next(iter(self.valid_loader))
+        x=imgs.to(self.device)
+        y = None if self.model_type == 'unc' else labels.to(self.device)
         
-#         imgs_stacked = list(map(lambda n: imgs[:n], self.batch_size))
-#         imgs_stacked = torch.cat(imgs_stacked, dim=0)
-        imgs_stacked = imgs[:n_row**2]
-        self.save_grid(imgs_stacked, f'/nfs/conditionalDDPM/tmp/{self.global_step:05d}-{mode}-{var_type}.png', nrow = n_row)
-        self.logger.experiment.log_artifact(run_id = self.logger.run_id,
-                                            local_path=f'/nfs/conditionalDDPM/tmp/{self.global_step:05d}-{mode}-{var_type}.png', 
-                                            artifact_path='training')
+        milestone = self.step // self.save_and_sample_every
+        n_images_to_sample = 25 
+        batches = num_to_groups(n_images_to_sample, self.batch_size) 
+        
+        #Save Output
+        all_images_list = list(map(lambda n: self.ema_model.sample(y if y == None else y[:n], batch_size=n), batches))
+        all_images = torch.cat(all_images_list, dim=0)
+        # all_images = (all_images + 1) * 0.5
+        self.save_grid(all_images, str(self.results_folder / f'{milestone:03d}-test-pred.png'), nrow = 5)
+
+        if self.model_type == 'c':
+            if len(y.shape) == 1:
+                self.save_with_1Dlabels(milestone, y, mode='test') 
+            else:
+                self.save_with_2Dlabels(milestone, x, batches, mode='test', var_type='original')
+                self.save_with_2Dlabels(milestone, y, batches, mode='test', var_type='condition')
+            self.step += 1
             
-    def GIFs(self, val_batch, gif_type = 'sampling'):
+            
+    def GIFs(self, gif_type = 'sampling'):
         """Generate GIFs"""
         
         assert gif_type in ('sampling','histo'), 'gif_type should be one of (sampling,histo)'
         
-        x, y = self.set_batch(batch)
-                            
-        y = y[:9]
+        model = self.ema_model
+        
+        imgs, labels = next(iter(self.valid_loader))
+        y = None if model.mode == 'unc' else labels.to(model.device)
+        y = y[:25]
             
-        shape = (9, model.channels, model.image_size, model.image_size)
+        shape = (25, model.channels, model.image_size, model.image_size)
         
         print(f'Generating {gif_type} GIF')
             
         b,_,h,w = shape
         img = torch.randn(shape, device=model.device)
         
-        with imageio.get_writer(str(f'/nfs/conditionalDDPM/tmp/{gif_type}.gif'), mode='I',fps=30) as writer:
+        with imageio.get_writer(str(self.results_folder / f'{gif_type}.gif'), mode='I',fps=30) as writer:
             for i in tqdm(reversed(range(0, model.num_timesteps)), desc='sampling loop time step', total=model.num_timesteps):
 
                 if gif_type == 'sampling':
-                    grid = np.array(utils.make_grid(img, nrow=3).permute((1,2,0)).cpu().detach())
+                    grid = np.array(utils.make_grid(img, nrow=5).permute((1,2,0)).cpu().detach())
     #                 to_save = np.array(img[0].squeeze().detach().cpu()).copy()
                     writer.append_data((np.clip(grid*255, 0, 255).astype(np.uint8)))
 
@@ -622,13 +730,46 @@ class LitModelDDPM(pl.LightningModule):
                     plt.ylim(0.,1.0)
                     plt.xlabel('x')
                     plt.ylabel('pdf(x)')
-                    plt.savefig('./tmp/test.png')
+                    plt.savefig('./logs/test.png')
                     plt.close()
                     npimage = imageio.imread('./logs/test.png')
                     writer.append_data(npimage)
-                    os.remove('./tmp/test.png')
+                    os.remove('./logs/test.png')
                 if self.model_type == 'c':
                     if len(y.shape) == 1: # Labels 1D
-                        y = self.model.label_reshaping(y, b, h, w, model.device)   
-                    img = self.model.label_concatenate(img,y)
-                img = self.model.p_sample(img, torch.full((b,), i, dtype=torch.long, device=model.device))   
+                        y = model.label_reshaping(y, b, h, w, model.device)   
+                    img = model.label_concatenate(img,y)
+                img = model.p_sample(img, torch.full((b,), i, dtype=torch.long, device=model.device))   
+                
+    def entropy(self):
+        
+        model = self.ema_model
+        
+        imgs, labels = next(iter(self.valid_loader))
+        y = None if model.mode == 'unc' else labels.to(model.device)
+        y = y[:25]
+            
+        shape = (25, model.channels, model.image_size, model.image_size)
+        
+        b,_,h,w = shape
+        img = torch.randn(shape, device=model.device)
+        
+        entropy = []
+        for i in tqdm(reversed(range(0, model.num_timesteps)), desc='sampling loop time step', total=model.num_timesteps):
+            
+            hist,bin_edges = np.histogram(np.array(img.flatten().cpu().detach()), bins=30, range=(-2.0,2.0))
+            dx = bin_edges[1]-bin_edges[0]
+            hist = hist/(dx*hist.sum())
+            entropy.append(-(hist*np.log(np.abs(hist))).sum())
+
+            if self.model_type == 'c':
+                if len(y.shape) == 1: # Labels 1D
+                    y = model.label_reshaping(y, b, h, w, model.device)   
+                img = model.label_concatenate(img,y)
+            img = model.p_sample(img, torch.full((b,), i, dtype=torch.long, device=model.device))  
+            
+        plt.figure()
+        plt.scatter(np.linspace(1,1000,1000), entropy)
+        plt.xlabel('Step')
+        plt.ylabel('Entropy')
+        plt.savefig(str(self.results_folder / 'entropy.png'))

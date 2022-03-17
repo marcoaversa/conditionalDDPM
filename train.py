@@ -9,11 +9,9 @@ import torch
 import torchvision
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
-from models.DDPM_MLFlow import Unet, GaussianDiffusion, LitModelDDPM
-from models.GBM import Unet, GBM, TrainerGBM
+from models.DDPM import Unet, GaussianDiffusion, LitModelDDPM
 
 from utils.dataset import import_dataset
-from utils.mlflow import display_mlflow_run_info
 
 import argparse
 
@@ -45,8 +43,8 @@ parser.add_argument('--seq_random', type=int, default=0, help='Only for the ligh
 
 # Mode
 parser.add_argument('--mode', type=str, default='train', choices=('train','test'), help='Select mode')
-parser.add_argument('--model_type', type=str, default='c', 
-                        choices=('unc','c'), help='Select model type')
+parser.add_argument('--model_type', type=str, default='c', choices=('unc','c'), help='Select model type')
+parser.add_argument('--save_loss_every', type=int, default=50, help='Save loss function every N steps')
 
 
 # Train Mode args
@@ -97,7 +95,8 @@ model = LitModelDDPM(
                 diffusion_model = diffusion, 
                 model_type = args.model_type,
                 batch_size = args.batch_size,
-                lr = args.lr
+                lr = args.lr,
+                save_loss_every = args.save_loss_every
                 )
 
 if args.mode == 'train':
