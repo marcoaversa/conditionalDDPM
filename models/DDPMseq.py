@@ -422,10 +422,18 @@ class GaussianDiffusion(nn.Module):
         return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
 
     @torch.no_grad()
-    def p_sample_loop(self, y, shape):
+    def p_sample_loop(self, Y, shape):
         b,_,h,w = shape
         img = torch.randn(shape, device=self.device)
+#         for i in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
         for i in reversed(range(0, self.num_timesteps)):
+        
+            prob = i / (self.num_timesteps/(len(Y[:,:])-1))
+            step = int(prob)
+            prob -= step
+            y = (1-prob)*Y[:,:,step]+prob*Y[:,:,step+1]
+            y = Y[:,:,-1]
+    
             if self.mode == 'c':
                 if len(y.shape) == 1: # Labels 1D
                     y = self.label_reshaping(y, b, h, w, self.device)   
@@ -464,18 +472,25 @@ class GaussianDiffusion(nn.Module):
         )
 
     def p_losses(self, x_start, t, y=None, noise = None):
-        b, c, h, w = x_start.shape
-        noise = default(noise, lambda: torch.randn_like(x_start)).to(x_start.device)
+        b, c, s, h, w = x_start.shape
+        noise = default(noise, lambda: torch.randn_like(x_start[:,:,0])).to(x_start.device)
 
-        x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
+        x_noisy = self.q_sample(x_start=x_start[:,:,0], t=t, noise=noise)
         if self.mode == 'c':
-            x_noisy = self.label_concatenate(x_noisy, y)
+            
+            prob = t / (self.num_timesteps/(len(y[:,:])-1))
+            step = prob.int()
+            prob -= step
+            new_y = torch.zeros((b,c,h,w),device=self.device)
+            for i,seq in enumerate(y):
+                new_y[i] = (1-prob[i])*seq[:,step[i]]+prob[i]*seq[:,step[i]+1] 
+            x_noisy = self.label_concatenate(x_noisy, new_y)
         x_recon = self.denoise_fn(x_noisy, t)
         
         return self.loss(noise,x_recon)
 
     def forward(self, x, y=None, *args, **kwargs):
-        b, c, h, w, device, img_size, = *x.shape, x.device, self.image_size
+        b, c, s, h, w, device, img_size, = *x.shape, x.device, self.image_size
         assert h == img_size and w == img_size, f'height {h} and width {w} of image must be {img_size}'
         t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
         if self.mode == 'c':
@@ -516,6 +531,9 @@ class LitModelDDPM(pl.LightningModule):
         
         loss = self.model(x,y)
         
+        # Use the current of PyTorch logger
+#         self.log("train_loss", loss, on_epoch=True)
+#         self.log("loss", loss, logger=True)
         if self.global_step % self.save_loss_every == 0:
             self.logger.experiment.log_metric(run_id = self.logger.run_id,
                                               key = 'loss', 
@@ -523,34 +541,42 @@ class LitModelDDPM(pl.LightningModule):
                                               step = self.global_step)
     
         return loss
-            
+    
     def validation_step(self, batch, batch_nb):
         
         x, y = self.set_batch(batch)
         n_images_to_sample = 9
-
+        
         all_images = self.model.sample(y if y == None else y[:9], batch_size=9)  
+        
+        y = y if y.ndim == 4 else y[:,:,-1]
+        x = x if x.ndim == 4 else x[:,:,0]
+        
         metrics_pred = self.model.metrics(all_images, y[:9])
         metrics_target = self.model.metrics(x[:9], y[:9])
-
+        
         self.logger.experiment.log_metric(run_id = self.logger.run_id,
                                           key = self.model.metrics_type+'-pred', 
                                           value = metrics_pred.item(),
                                           step = self.global_step)
-
+        
         self.logger.experiment.log_metric(run_id = self.logger.run_id,
                                           key = self.model.metrics_type+'-target', 
                                           value = metrics_target.item(),
                                           step = self.global_step)
-
+        
         self.save_with_2Dlabels(all_images, mode='train', var_type='pred', n_row=3)
+#         self.save_grid(all_images, f'/nfs/conditionalDDPM/tmp/{self.global_step:05d}-train-pred.png', nrow = 3)
+#         self.logger.experiment.log_artifact(run_id = self.logger.run_id,
+#                                             local_path=f'/nfs/conditionalDDPM/tmp/{self.global_step:05d}-train-pred.png', 
+#                                             artifact_path='training')
 
         if self.model_type == 'c':
             if len(y.shape) == 1:
                 self.save_with_1Dlabels(y, mode='train') 
             else:
                 self.save_with_2Dlabels(x, mode='train', var_type='target', n_row=3)
-                self.save_with_2Dlabels(y if y.shape[1]!= 2 else y[:,0][:,None], 
+                self.save_with_2Dlabels(y if y.shape[1] != 2 else y[:,0][:,None], 
                                         mode='train', var_type='input', n_row=3)
 
 
@@ -558,8 +584,12 @@ class LitModelDDPM(pl.LightningModule):
         self.logger.experiment.log_artifact(run_id = self.logger.run_id,
                                                     local_path=f'/nfs/conditionalDDPM/tmp/model.pt', 
                                                     artifact_path=None)
+#             self.flag=1
             
         """TODO: Add also GIF!!"""
+        
+#     def validation_epoch_end(self, validation_step_outputs):
+#         self.flag=0
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.model.parameters(), lr=self.lr)

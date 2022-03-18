@@ -10,6 +10,7 @@ import torchvision
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
 from models.DDPM import Unet, GaussianDiffusion, LitModelDDPM
+# from models.DDPMseq import Unet, GaussianDiffusion, LitModelDDPM
 
 from utils.dataset import import_dataset
 
@@ -34,12 +35,17 @@ parser.add_argument('--run_name', type=str, default='test', help='run name track
 parser.add_argument('--dataset', type=str, default='MNIST', choices=('MNIST',
                                                                      'CIFAR10',
                                                                      'speckles',
-                                                                     'light_sheets_full',
-                                                                     'light_sheets_ae',
-                                                                     'light_sheets_seq'), help='Choose the dataset')
+                                                                     'ls_random',
+                                                                     'ls_full',
+                                                                     'ls_firstlast',
+                                                                     'ls_ae',), help='Choose the dataset')
 parser.add_argument('--dataset_path', type=str, default='./data', help='Choose the dataset path')
-parser.add_argument('--image_size', type=int, default=28, help='Select input image size')
-parser.add_argument('--seq_random', type=int, default=0, help='Only for the light sheets dataset, select a random diffused image in the sequence (True) or the most diffuse one (False)')
+parser.add_argument('--image_size', type=int, default=128, help='Decide the size of the cropped images')
+
+# Model
+
+parser.add_argument('--dim', type=int, default=32, help='Choose the number of channels on the first UNet s layer')
+parser.add_argument('--n_layers', type=int, default=4, help='Choose how many layers for the UNet')
 
 # Mode
 parser.add_argument('--mode', type=str, default='train', choices=('train','test'), help='Select mode')
@@ -66,17 +72,21 @@ mlflow.set_experiment(args.experiment_name)
 
 # Define Dataset
 
-train_loader, valid_loader, image_size, channels, dim_mults = import_dataset(data_name = args.dataset, 
-                                                                             batch_size = args.batch_size, 
-                                                                             image_size = args.image_size, 
-                                                                             seq_random = args.seq_random)
+train_loader, valid_loader = import_dataset(data_name = args.dataset, 
+                                            batch_size = args.batch_size,
+                                            image_size = args.image_size)
 
-condition_dim = 2 if args.dataset == 'light_sheets_full' else 1
+x,y = next(iter(train_loader))
+_, channels, height, width = x.shape
+assert height == width, 'Image should be square'
+image_size = height
+condition_dim = 1 if y.ndim == 1 else channels
+dim_mults = [2**i for i in range(args.n_layers)]
 
 # Define Model
 
 model = Unet(
-    dim = 64,
+    dim = 32,
     dim_mults = dim_mults,
     channels = channels if args.model_type == 'unc' else channels+condition_dim,
     out_dim = channels, 
@@ -84,7 +94,7 @@ model = Unet(
 
 diffusion = GaussianDiffusion(
                 model,
-                image_size = args.image_size,
+                image_size = image_size,
                 timesteps = args.timesteps,   
                 loss_type = args.loss,  
                 channels = channels,

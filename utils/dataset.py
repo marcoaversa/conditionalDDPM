@@ -20,30 +20,30 @@ import tifffile as tiff
 import pyjetraw4ai_proto as jetraw4ai
 
     
-def import_dataset(data_name: str = 'MNIST', batch_size: int = 32, image_size: int = 28,
-                   sum_from: int = 0, sum_to: int = 50, import_timeseries = False, 
-                   sum_every_n_steps: int = 5, seq_random: bool = True, seq_full: bool = False,
-                   force_download: bool = False):
+def import_dataset(data_name: str = 'MNIST', batch_size: int = 32, sum_from: int = 0, sum_to: int = 50, 
+                   image_size = 128, import_timeseries = False, sum_every_n_steps: int = 5, 
+                   seq_random: bool = True, seq_full: bool = False, force_download: bool = False):
     if data_name == 'MNIST':
-        train_loader, valid_loader, image_size, channels, dim_mults = import_mnist(batch_size)
+        train_loader, valid_loader = import_mnist(batch_size)
     elif data_name == 'CIFAR10':
-        train_loader, valid_loader, image_size, channels, dim_mults = import_cifar10(batch_size)
+        train_loader, valid_loader = import_cifar10(batch_size)
     elif data_name == 'speckles':
-        train_loader, valid_loader, image_size, channels, dim_mults = import_speckles(sum_from = sum_from, sum_to = sum_to, 
-                                                                                      batch_size = batch_size, image_size = image_size,
-                                                                                      import_timeseries = import_timeseries, 
-                                                                                      sum_every_n_steps = sum_every_n_steps)
+        train_loader, valid_loader = import_speckles(sum_from = sum_from, 
+                                                     sum_to = sum_to, 
+                                                     batch_size = batch_size, 
+                                                     import_timeseries = import_timeseries, 
+                                                     sum_every_n_steps = sum_every_n_steps)
     
-    if data_name.startswith('light_sheets'):
+    if data_name.startswith('ls'):
         mode = data_name.split('_')[-1]
-        train_loader, valid_loader, image_size, channels, dim_mults = import_ls(mode = mode, 
-                                                                                batch_size = batch_size, 
-                                                                                image_size = image_size,
-                                                                                seq_random = seq_random,
-                                                                                seq_full = seq_full,
-                                                                                force_download = force_download)
+        train_loader, valid_loader = import_ls(mode = mode, 
+                                               batch_size = batch_size,
+                                               image_size = image_size,
+                                               seq_random = seq_random,
+                                               seq_full = seq_full,
+                                               force_download = force_download)
         
-    return train_loader, valid_loader, image_size, channels, dim_mults
+    return train_loader, valid_loader
 
 def import_mnist(batch_size: int = 32):
     data_name = 'MNIST'
@@ -55,7 +55,7 @@ def import_mnist(batch_size: int = 32):
     image_size=28
     train_set, valid_set = import_from_torchvision(data_name, data_path, mu, sigma)
     train_loader, valid_loader = set_dataloaders(train_set, valid_set, batch_size)
-    return train_loader, valid_loader, image_size, channels, dim_mults
+    return train_loader, valid_loader
 
 def import_mnist_blurred(batch_size: int = 32):
     data_name = 'MNIST_blurred'
@@ -69,7 +69,7 @@ def import_mnist_blurred(batch_size: int = 32):
     train_set = [(img, F.gaussian_blur(img, 11, (4.0, 4.0))) for (img,label) in train_set]
     valid_set = [(img, F.gaussian_blur(img, 11, (4.0, 4.0))) for (img,label) in valid_set]
     train_loader, valid_loader = set_dataloaders(train_set, valid_set, batch_size)
-    return train_loader, valid_loader, image_size, channels, dim_mults
+    return train_loader, valid_loader
 
 
 def import_cifar10(batch_size: int = 32):
@@ -82,14 +82,15 @@ def import_cifar10(batch_size: int = 32):
     image_size=32
     train_set, valid_set = import_from_torchvision(data_name, data_path, mu, sigma)
     train_loader, valid_loader = set_dataloaders(train_set, valid_set, batch_size)
-    return train_loader, valid_loader, image_size, channels, dim_mults
+    return train_loader, valid_loader
 
 
 def import_speckles(sum_from: int = 0, sum_to: int = 10, batch_size: int = 32, 
-                    image_size: int = 28, import_timeseries = False, sum_every_n_steps = 5):
+                    import_timeseries = False, sum_every_n_steps = 5):
     data_path = './data/speckles'
     mu = (0,)
     sigma = (1,)
+    image_size = 28
     channels = 1
     dim_mults = (1,2,4)
     sum_from = 6 if sum_from < 6 else sum_from # First 5 timesteps don't have signal
@@ -117,7 +118,7 @@ def import_speckles(sum_from: int = 0, sum_to: int = 10, batch_size: int = 32,
     train_set = SpeckleDataset( (X[:train_size], y[:train_size]), transform=train_transform , size = image_size )
     valid_set = SpeckleDataset( (X[train_size:], y[train_size:]), transform=test_transform , size = image_size )
     train_loader, valid_loader = set_dataloaders(train_set, valid_set, batch_size)
-    return train_loader, valid_loader, image_size, channels, dim_mults
+    return train_loader, valid_loader
 
 
 def detect_sequence(data_path: str = './data/light_sheets', image_size: int = 128, BG: int = 443):
@@ -179,16 +180,16 @@ def import_ls(mode: str = 'seq', batch_size: int = 32, image_size: int = 128,
     """
     data_path = './data/light_sheets'
     channels = 1
-    dim_mults = (1,2,4)
+    dim_mults = (1,2,4,8)
     BG = 443
     noise_threshold = 20.
     
-    if not os.path.exists(os.path.join(data_path, f'X_{mode}_{image_size}.pt')) or force_download:
+    if not os.path.exists(os.path.join(data_path, f'X_{image_size}.pt')) or force_download:
     
-        if os.path.exists(os.path.join(data_path, f'X_{mode}_{image_size}.pt')):
-            os.remove(os.path.join(data_path, f'X_{mode}_{image_size}.pt'))
-        if os.path.exists(os.path.join(data_path, f'Y_{mode}_{image_size}.pt')):
-            os.remove(os.path.join(data_path, f'Y_{mode}_{image_size}.pt'))
+        if os.path.exists(os.path.join(data_path, f'X_{image_size}.pt')):
+            os.remove(os.path.join(data_path, f'X_{image_size}.pt'))
+        if os.path.exists(os.path.join(data_path, f'Y_{image_size}.pt')):
+            os.remove(os.path.join(data_path, f'Y_{image_size}.pt'))
 
         positions, z_stacks, x_shifts = detect_sequence(image_size = image_size, BG = BG)
 
@@ -217,24 +218,6 @@ def import_ls(mode: str = 'seq', batch_size: int = 32, image_size: int = 128,
 
         X = torch.cat(tiles)
 
-#         if mode == 'DPSeqDarkening':
-#             for i in range(1,X.shape[1]):
-#                 factor = X[:,i].mean()/X[:,0].mean()
-#                 print(f'Decreasing Intensity Step {i} --> Scaling factor = {factor:.2f}')
-#                 X[:,i] = decrease_intensity(X[:,0].clone(), I_scale.item())
-        
-#         if mode == 'DPSeqDiffuse':
-#             N_steps = 1000
-#             ref_img = X[:,0].clone()
-#             X = torch.zeros((X.shape[0],N_steps,X.shape[1],X.shape[2]))
-#             for i in torch.linspace(100, 29000, N_steps):
-#                 factor = int(i)
-#                 print(f'Diffusing Step {i} --> Scaling factor = {factor}')
-#                 X[:,i] = diffusion(X[:,0].clone(), factor)
-
-#         if mode == 'ae':      
-#             Y = X
-#         else:
         X = X[:,1:]        
         Y = X[:,0][:,None]
             
@@ -253,15 +236,12 @@ def import_ls(mode: str = 'seq', batch_size: int = 32, image_size: int = 128,
 
         torch.save(X, os.path.join(data_path, f'X_{image_size}.pt'))
         torch.save(Y, os.path.join(data_path, f'Y_{image_size}.pt'))
-#         with open(os.path.join(data_path, f"deltaZ_{image_size}.txt"), "w") as f:
-#             for element in Z:
-#                 f.write(f'{int(element)}\n')
         print(f"\nDataset containes {len(X)} tiles")
         
     else:
         print("Loading Dataset")
-        X = torch.load(os.path.join(data_path, f'X_{mode}_{image_size}.pt'))
-        Y = torch.load(os.path.join(data_path, f'Y_{mode}_{image_size}.pt'))
+        X = torch.load(os.path.join(data_path, f'X_{image_size}.pt'))
+        Y = torch.load(os.path.join(data_path, f'Y_{image_size}.pt'))
         
     train_size = int(len(X)*0.8)
     
@@ -270,17 +250,15 @@ def import_ls(mode: str = 'seq', batch_size: int = 32, image_size: int = 128,
         x /= energy
         x_min = x.min()
         x_max = x.max()
-        return torch.clip(x - x_min,0,None)/(x_max-x_min)-0.5
+        return (torch.clip(x - x_min,0,None)/(x_max-x_min)-0.5)*2
     
     transform = transforms.Compose([energy_norm,])
 
-    train_set = LightSheetsDataset( (Y[:train_size], X[:train_size]), mode=mode, 
-                                    seq_random=seq_random, seq_full=seq_full, transform=transform)
-    valid_set = LightSheetsDataset( (Y[train_size:], X[train_size:]), mode=mode, 
-                                    seq_random=seq_random, seq_full=seq_full, transform=transform)
+    train_set = LightSheetsDataset( (Y[:train_size], X[:train_size]), mode=mode, transform=transform)
+    valid_set = LightSheetsDataset( (Y[train_size:], X[train_size:]), mode=mode, transform=transform)
     train_loader, valid_loader = set_dataloaders(train_set, valid_set, batch_size)
     print('Light Sheet data imported!')
-    return train_loader, valid_loader, image_size, channels, dim_mults
+    return train_loader, valid_loader
 
 
 def decrease_intensity(
@@ -443,37 +421,53 @@ class LightSheetsDataset(Dataset):
     """TensorDataset with support of transforms."""
     def __init__(self, 
                  tensors, 
-                 mode:str = 'seq', 
-                 seq_random: bool = True, 
-                 seq_full: bool = False, 
+                 mode:str = 'full', 
                  transform=None):
         assert all(tensors[0].shape[0] == tensor.shape[0] for tensor in tensors)
         self.tensors = tensors
         self.transform = transform
         self.mode = mode
-        self.seq_random = seq_random 
-        self.seq_full = seq_full 
 
     def __getitem__(self, index):
         x = self.tensors[0][index].clone()
         y = self.tensors[1][index].clone()
     
-        if not self.seq_full:
+        if self.mode != 'full':
             x = x[:,0]
-            if self.seq_random:
-                index=torch.randint(0,len(Y[0])-1,(1,)).item()
+            if self.mode == 'random':
+                index=torch.randint(0,len(y[0])-1,(1,)).item()
                 y = y[:,index]
-            else:
+            elif self.mode == 'firstlast':
                 y = y[:,-1]
+            elif self.mode == 'ae':
+                y = x
             
         if self.transform:
             x = self.transform(x)
-            if self.seq_full:
+            if self.mode == 'full':
                 for i in range(y.shape[1]):
                     y[:,i] = self.transform(y[:,i])
             else:
                 y = self.transform(y)
             
+#         if mode == 'DPSeqDarkening':
+#             for i in range(1,X.shape[1]):
+#                 factor = X[:,i].mean()/X[:,0].mean()
+#                 print(f'Decreasing Intensity Step {i} --> Scaling factor = {factor:.2f}')
+#                 X[:,i] = decrease_intensity(X[:,0].clone(), I_scale.item())
+        
+#         if mode == 'DPSeqDiffuse':
+#             N_steps = 1000
+#             ref_img = X[:,0].clone()
+#             X = torch.zeros((X.shape[0],N_steps,X.shape[1],X.shape[2]))
+#             for i in torch.linspace(100, 29000, N_steps):
+#                 factor = int(i)
+#                 print(f'Diffusing Step {i} --> Scaling factor = {factor}')
+#                 X[:,i] = diffusion(X[:,0].clone(), factor)
+
+#         if mode == 'ae':      
+#             Y = X
+#         else:
         x = x.type(torch.FloatTensor)        
         y = y.type(torch.FloatTensor)
 
