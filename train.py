@@ -9,8 +9,9 @@ import torch
 import torchvision
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
-from models.DDPM import Unet, GaussianDiffusion, LitModelDDPM
+from models.DDPM_LearnSigma import Unet, GaussianDiffusion, LitModelDDPM
 # from models.DDPMseq import Unet, GaussianDiffusion, LitModelDDPM
+# from models.DDPMdp import Unet, GaussianDiffusion, LitModelDDPM
 
 from utils.dataset import import_dataset
 
@@ -32,13 +33,15 @@ parser.add_argument('--experiment_name', type= str, default='dev', help='experim
 parser.add_argument('--run_name', type=str, default='test', help='run name tracked on mlflow')
 
 # Data & Results 
-parser.add_argument('--dataset', type=str, default='MNIST', choices=('MNIST',
-                                                                     'CIFAR10',
-                                                                     'speckles',
-                                                                     'ls_random',
-                                                                     'ls_full',
-                                                                     'ls_firstlast',
-                                                                     'ls_ae',), help='Choose the dataset')
+# parser.add_argument('--dataset', type=str, default='MNIST', choices=('MNIST',
+#                                                                      'CIFAR10',
+#                                                                      'speckles',
+#                                                                      'ls_random',
+#                                                                      'ls_full',
+#                                                                      'ls_firstlast',
+#                                                                      'ls_ae',
+#                                                                      'ls_aedp',), help='Choose the dataset')
+parser.add_argument('--dataset', type=str, default='MNIST', help='Choose the dataset')
 parser.add_argument('--dataset_path', type=str, default='./data', help='Choose the dataset path')
 parser.add_argument('--image_size', type=int, default=128, help='Decide the size of the cropped images')
 
@@ -51,15 +54,16 @@ parser.add_argument('--n_layers', type=int, default=4, help='Choose how many lay
 parser.add_argument('--mode', type=str, default='train', choices=('train','test'), help='Select mode')
 parser.add_argument('--model_type', type=str, default='c', choices=('unc','c'), help='Select model type')
 parser.add_argument('--save_loss_every', type=int, default=50, help='Save loss function every N steps')
-
+parser.add_argument('--sample_every', type=int, default=1, help='Sample every N steps in the DDPM sampling process')
 
 # Train Mode args
 parser.add_argument('--timesteps', type=int, default=1000, help='Select number of timesteps diffusion model')
 parser.add_argument('--train_num_steps', type=int, default=100000, help='Number of training steps')
-parser.add_argument('--loss', type=str, default='l2', choices=('l1','l2'), help='Select loss type')
+parser.add_argument('--loss', type=str, default='l2', choices=('l1','l2','vae'), help='Select loss type')
 parser.add_argument('--lr', type=float, default=2e-05, help='Learning rate')
+parser.add_argument('--clip', type=float, default=1., help='Clipping during Sampling')
 parser.add_argument('--batch_size', type=int, default=32, help='Select batch size')
-parser.add_argument('--device', type=str, default='cuda', choices=('cpu','cuda'), help='Select the device')
+parser.add_argument('--device', type=str, default='cuda:0', choices=('cpu','cuda:0'), help='Select the device')
 
 # Set Parser
 
@@ -77,7 +81,16 @@ train_loader, valid_loader = import_dataset(data_name = args.dataset,
                                             image_size = args.image_size)
 
 x,y = next(iter(train_loader))
-_, channels, height, width = x.shape
+
+print(x.min(),y.min())
+
+if args.dataset.startswith('ls'):
+    if args.dataset.endswith('full'):
+        _, channels, steps, height, width = x.shape
+    else:
+        _, channels, height, width = x.shape
+else:
+    _, channels, height, width = x.shape
 assert height == width, 'Image should be square'
 image_size = height
 condition_dim = 1 if y.ndim == 1 else channels
@@ -85,22 +98,28 @@ dim_mults = [2**i for i in range(args.n_layers)]
 
 # Define Model
 
+"""Define NN"""
 model = Unet(
-    dim = 32,
+    dim = args.dim,
     dim_mults = dim_mults,
     channels = channels if args.model_type == 'unc' else channels+condition_dim,
     out_dim = channels, 
 )
 
+"""Define DDPM"""
 diffusion = GaussianDiffusion(
                 model,
                 image_size = image_size,
-                timesteps = args.timesteps,   
+                timesteps = args.timesteps,  
+                sample_every = args.sample_every, 
                 loss_type = args.loss,  
                 channels = channels,
-                model_type = args.model_type
+                model_type = args.model_type,
+                clip = args.clip,
+                device = args.device
                 )
 
+"""Define Pytorch Lightning Model"""
 model = LitModelDDPM( 
                 diffusion_model = diffusion, 
                 model_type = args.model_type,
@@ -109,27 +128,38 @@ model = LitModelDDPM(
                 save_loss_every = args.save_loss_every
                 )
 
-if args.mode == 'train':
-    mlf_logger = MLFlowLogger(tracking_uri=args.tracking_uri,
-                              experiment_name=args.experiment_name, 
-                              run_name=args.run_name
-                             )
-    
-    run_id = mlf_logger.run_id
+"""Define Logger"""
+mlf_logger = MLFlowLogger(tracking_uri=args.tracking_uri,
+                          experiment_name=args.experiment_name, 
+                          run_name=args.run_name
+                         )
 
-    for key in list(args.__dict__.keys()):
-        mlf_logger.experiment.log_param(run_id=run_id, key=key, value=getattr(args, key))
+run_id = mlf_logger.run_id
 
-    trainer = Trainer(
-                     enable_checkpointing=False,
-                     logger=mlf_logger,
-                     max_steps = args.train_num_steps,
-                     limit_val_batches=1,
-                     log_every_n_steps=50,
-                     gpus=1 if args.device == 'cuda' else 0)
+for key in list(args.__dict__.keys()):
+    mlf_logger.experiment.log_param(run_id=run_id, key=key, value=getattr(args, key))
 
-    t = trainer.fit(
+"""Define Trainer"""
+trainer = Trainer(
+                 enable_checkpointing=False,
+                 logger=mlf_logger,
+                 max_steps = args.train_num_steps,
+                 limit_val_batches=1,
+                 limit_test_batches=1,
+                 log_every_n_steps=50,
+                 num_sanity_val_steps=0,
+                 gpus=1 if args.device == 'cuda:0' else 0)
+
+"""Train the model"""
+trainer.fit(
         model,
-        train_dataloaders=train_loader,
-        val_dataloaders=valid_loader,
-    )
+        train_dataloaders=train_loader
+)
+
+"""Save Results at the end of the training"""
+model.model.denoise_fn.load_state_dict(torch.load(f'/nfs/conditionalDDPM/tmp/model_best.pt'))
+
+trainer.test(
+        model,
+        dataloaders=valid_loader
+)

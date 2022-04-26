@@ -13,12 +13,17 @@ from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 from torch.nn.functional import interpolate
 from torchvision.transforms import GaussianBlur, CenterCrop
+import torchvision.transforms.functional as F
 
+import random
 
 import tifffile as tiff
 
-import pyjetraw4ai_proto as jetraw4ai
+from typing import Union
 
+import pyjetraw4ai_proto as jetraw4ai 
+
+# import kornia
     
 def import_dataset(data_name: str = 'MNIST', batch_size: int = 32, sum_from: int = 0, sum_to: int = 50, 
                    image_size = 128, import_timeseries = False, sum_every_n_steps: int = 5, 
@@ -181,8 +186,10 @@ def import_ls(mode: str = 'seq', batch_size: int = 32, image_size: int = 128,
     data_path = './data/light_sheets'
     channels = 1
     dim_mults = (1,2,4,8)
-    BG = 443
+#     BG = 443
+    BG = 325
     noise_threshold = 20.
+    transform = None
     
     if not os.path.exists(os.path.join(data_path, f'X_{image_size}.pt')) or force_download:
     
@@ -196,7 +203,7 @@ def import_ls(mode: str = 'seq', batch_size: int = 32, image_size: int = 128,
         seq, delta_zs=[],[]
         for i in range(101-max(z_stacks)):
             names = [f'./Pos{p:02d}/img_channel000_position{p:03d}_time000000000_z{z_stacks[j]+i:03d}.tif' for j,p in enumerate(positions)]
-            seq.append([torch.clip(Tensor(tiff.imread(os.path.join(data_path, name)).astype(np.int16))-BG,0,None) for name in names])
+            seq.append([torch.clip(Tensor(tiff.imread(os.path.join(data_path, name)).astype(np.int16)),0,None) for name in names])
             delta_zs.append([z_stacks[j]+i - z_stacks[0] for j,p in enumerate(positions[1:])])
 
         n_shifts = len(positions)
@@ -217,15 +224,26 @@ def import_ls(mode: str = 'seq', batch_size: int = 32, image_size: int = 128,
                 tiles.append(tile_multichannel_images(x, image_size))
 
         X = torch.cat(tiles)
-
+        
+#         print('Stack Denoised Images')
+#         X_denoised = X.clone()
+#         for x in tqdm(X):
+#             X_denoised[i]= TVDenoising(x.clone()).detach()
+            
+#         conc = torch.cat([X[:,None],X_denoised[:,None]], dim=1)
+#         X = X[:,:,1:]        
+#         Y = X[:,:,0][:,:,None]
+        
         X = X[:,1:]        
         Y = X[:,0][:,None]
-            
-
+        
         # Permute images
         indices=torch.randperm(len(X))
         X = X[indices, None]
         Y = Y[indices, None] # Y.shape = (B,C,Steps,H,W)
+#         X = X[indices]
+#         Y = Y[indices] # Y.shape = (B,C,Steps,H,W)
+        
 
         print('Saving Tiles')
         # Remove noisy images
@@ -245,14 +263,42 @@ def import_ls(mode: str = 'seq', batch_size: int = 32, image_size: int = 128,
         
     train_size = int(len(X)*0.8)
     
-    def energy_norm(x):
-        energy = x.mean()# --> x.shape = (C,H,W)
-        x /= energy
-        x_min = x.min()
-        x_max = x.max()
-        return (torch.clip(x - x_min,0,None)/(x_max-x_min)-0.5)*2
+#     def energy_norm(x):
+#         energy = x.mean()# --> x.shape = (C,H,W)
+#         x /= energy
+#         x = (x-x.mean())/x.std()
+#         return x
+# #         x_min = x.min()
+# #         x_max = x.max()
+# #         return (torch.clip(x - x_min,0,None)/(x_max-x_min)-0.5)*2
     
-    transform = transforms.Compose([energy_norm,])
+#     def energy_norm(x):
+#         BG=325
+#         #Mean and std computed after BG removed
+#         mu=163.0387
+# #         sigma=3.2148
+#         sigma=52.404
+#         return (x-BG-mu)/sigma
+# #         return (x/2**16-1)-0.5
+    
+#     def norm(x):
+#         vmin = 330
+#         vmax = 10852
+#         x = (x-vmin)/(vmax-vmin)
+#         return x
+    
+    mu = 473.93
+    sigma = 50.44
+#     mu = 0.0137
+#     sigma = 0.0048
+
+    def clip(x):
+        return torch.clip(x,-5,5)
+    
+    transform = transforms.Compose([
+                                    transforms.Normalize(mu, sigma),
+                                    clip
+                                    ])
 
     train_set = LightSheetsDataset( (Y[:train_size], X[:train_size]), mode=mode, transform=transform)
     valid_set = LightSheetsDataset( (Y[train_size:], X[train_size:]), mode=mode, transform=transform)
@@ -289,42 +335,196 @@ def decrease_intensity(
     if isinstance(imgs, torch.Tensor):
         imgs = np.array(imgs).astype(np.float64)
         
-    if I_scale < 1.:
+    if factor < 1.:
         
         params = jetraw4ai.Parameters(G,B,N,W)
 
-        for i, img in tqdm(enumerate(imgs)):
+        for i, img in enumerate(imgs):
             im_scaled = jetraw4ai.JetrawImage(img, params)
             imgs[i] = im_scaled.scale_exposure(factor).image_data
 
     return torch.Tensor(imgs)            
 
+def replace_noise(
+                imgs, 
+                factor: float =  1., 
+                B: float = 99.6, 
+                G: float = 2.2, 
+                N: float = 3., 
+                W: float = 2**16-1):
+    
+    assert imgs.ndim == 3, 'Input image should be in the raw pattern format (B,H,W)'
+    if isinstance(imgs, torch.Tensor):
+        imgs = np.array(imgs).astype(np.float64)
+        
+    params = jetraw4ai.Parameters(G,B,N,W)
+    
+    for i, img in enumerate(imgs):
+        im_scaled = jetraw4ai.JetrawImage(img, params)
+        imgs[i] = im_scaled.replace_noise().image_data
+
+    return torch.Tensor(imgs)
+    
 def diffusion(
         imgs, 
-        factor: int =  1., 
+        factor: float =  1., 
         B: float = 99.6, 
         G: float = 2.2, 
         N: float = 3., 
         W: float = 2**16-1):
     
     
-    assert factor <= 29400 or factor > 0, 'Intensity scale factor should be in the range (0.,29400.]'
+    assert factor <= 1. or factor >= 0, 'Intensity scale factor should be in the range (0.,29400.]'
     assert imgs.ndim == 3, 'Input image should be in the raw pattern format (B,H,W)'
     if isinstance(imgs, torch.Tensor):
         imgs = np.array(imgs).astype(np.float64)
     
     params = jetraw4ai.Parameters(G,B,N,W)
 
-    for i, img in tqdm(enumerate(imgs)):
+    for i, img in enumerate(imgs):        
         jetraw_img = jetraw4ai.JetrawImage(img, params)
         el_repr = jetraw_img.electron_repr()
-        el_repr.image_data += factor
+        v_max = el_repr.image_data.max()
+        v_max_el = int((W-B)/G)
+        f = int(factor*(v_max_el-v_max))
+        el_repr.image_data += f
         diffused_img = el_repr.replace_noise().digital_repr().image_data
         ratio = diffused_img.mean()/img.mean()
         diffused_img /= ratio
         imgs[i] = diffused_img
     return torch.Tensor(imgs)
+
+def image_info(image: Union[np.ndarray, Tensor]):
+    shape = image.shape
+    if len(shape) == 3:
+        if isinstance(image, Tensor):
+            C, H, W = shape
+        elif isinstance(image, np.ndarray):
+            H, W, C = shape
+        else:
+            raise NotImplementedError("Expected torch.Tensor or np.ndarray")
+    elif len(shape) == 2:
+        H, W = shape
+        C = 1
+    else:
+        raise NotImplementedError("Image shape is {shape}. It expected image with shape (H,W), (C,H,W) or (H,W,C)")
+
+    return C, H, W
+
+def image2patches(image: Union[np.ndarray, Tensor], patch_size: list, view_as_patches: bool = False):
+    """
+        Patch a 2D image in tiles.
+
+        Args:
+            image: 
+                Image to patch. Image should be 2D. 
+            patch_size:
+                Final size of the tiles. 
+            view_as_patches:
+                Example for 2D image:
+                    If set true -> return the final output is 4D (N_patch_x, N_patch_y, Patch_size_x, Patch_size_y)
+                        image.shape = (100,100), patch_size = (2,2) -> patches.shape = (50,50,2,2)
+                    If set False -> return the final output is 3D (N_patch, Patch_size_x, Patch_size_y)
+                        image.shape = (100,100), patch_size = (2,2) -> patches.shape = (2500,2,2)
+        Return:
+            patches:
+                Image splitted in patches        
+
+    """
+
+    C, H, W = image_info(image)
+    assert C == 1, "Image needs to be 2D."
+    p0, p1 = patch_size
+
+    x_max = p0*(H//p0) # integer number for patches
+    y_max = p1*(W//p1)
+    
+    image = image[0:x_max, 0:y_max]
+    if view_as_patches:
+        return image.reshape(H//p0,p0,W//p1,p1).swapaxes(1,2).reshape(-1,p0,p1)
+    else:
+        return image.reshape(H//p0,p0,W//p1,p1).swapaxes(1,2)
+
+
+def patches2image(patches):
+    """
+        Return patches obtained from a 2D image into the original image.
+
+        Args:
+            patches: 
+                Tiles to return into the 2D image. Shape = (N_patch_x, N_patch_y, Patch_size_x, Patch_size_y)
+            Return:
+                image:
+                    2D image reconstructed from patches
+
+    """
+    
+    assert len(patches.shape) == 4, "patches2image is compatible with image2patches, input patches should be in the shape (N_patch_x, N_patch_y, Patch_size_x, Patch_size_y)"
+    n_h,n_w,p0,p1 = patches.shape
+    return patches.reshape(n_h, n_w, p0,p1).swapaxes(1,2).reshape(n_h*p0,n_w*p1)
+
+def downsample(image, downsample_size):
+    if image.ndim == 2:
+        image = image[None]
+    assert image.ndim == 3, f'Image shape should be (C,H,W) instead of {image.shape}'
+    patches = image2patches(image, patch_size= [downsample_size,downsample_size], view_as_patches = False)
+    image = patches2image(patches.mean(-1).mean(-1)[None,None])[None]
+    return image[0]
+
+def inv_split_mosaic(imgs: torch.Tensor):
+
+    C, H, W = imgs.shape
+    
+    mosaic = torch.zeros((H*2, W*2))
+    imgs = [imgs[c] for c in range(C)]
+
+    c = 0
+    for i in range(2):
+        for j in range(2):
+            mosaic[i::2, j::2] = imgs[c] 
+            c+=1
+
+    return mosaic
+
+def upsample_clone(image):
+    image = image[None].repeat(4,1,1)
+    image = inv_split_mosaic(image)
+    return image
+
+def upsample_interpolation(img):
+    return interpolate(img[None,None], size=(2,2))[0,0]
+
+# class TVDenoise(torch.nn.Module):
+#     def __init__(self, noisy_image):
+#         super(TVDenoise, self).__init__()
+#         self.l2_term = torch.nn.MSELoss(reduction='mean')
+#         self.regularization_term = kornia.losses.TotalVariation()
+#         # create the variable which will be optimized to produce the noise free image
+#         self.clean_image = torch.nn.Parameter(data=noisy_image.clone(), requires_grad=True)
+#         self.noisy_image = noisy_image
+
+#     def forward(self):
+#         return self.l2_term(self.clean_image, self.noisy_image) + 0.0001 * self.regularization_term(self.clean_image)
+
+#     def get_clean_image(self):
+#         return self.clean_image
+
+# def TVDenoising(image: torch.Tensor):
+#     """Image shape = (B,C,W,H)"""
+    
+#     tv_denoiser = TVDenoise(image)
+#     optimizer = torch.optim.SGD(tv_denoiser.parameters(), lr=0.1, momentum=0.9)
+
+#     # run the optimization loop
+#     num_iters = 500
+#     for i in range(num_iters):
+#         optimizer.zero_grad()
+#         loss = tv_denoiser()
+#         loss.backward()
+#         optimizer.step()
         
+#     return tv_denoiser.get_clean_image()
+    
 def tile_image(image, image_size):
     """Image shape (H,W)"""
     return image.unfold(0,image_size,image_size).unfold(1,image_size,image_size).reshape(-1,image_size,image_size)
@@ -417,6 +617,76 @@ class SpeckleDataset(Dataset):
         elif self.size < h:
             assert self.size < h, 'I haven t implemented yet the downsampling'
             
+electron_repr = lambda x: (x - 99.6)/ 2.2
+digital_repr = lambda x: (x * 2.2 + 99.6)
+
+def decrease_intensity(image_data: torch.Tensor, factor: float):
+    if not 0 <= factor <= 1:
+        raise ValueError("factor must be between 0 and 1")
+
+    image_data = electron_repr(image_data)
+    if factor != 1:
+        scaled_data = factor * image_data
+        noise_var = (1 - factor) * torch.clip(scaled_data, 0, None) + \
+                    (1 - factor ** 2) * (3.0 / 2.2) ** 2
+        scaled_data = digital_repr(scaled_data + torch.normal(0, torch.sqrt(noise_var)))
+        return torch.clip(scaled_data,0,2**16-1)
+    else:
+        return digital_repr(image_data)   
+
+class AddGaussianNoise(object):
+    def __init__(self,std):
+        self.std = std
+        
+    def __call__(self, tensor):
+        return tensor + torch.randn(tensor.size()) * self.std
+    
+    def __repr__(self):
+        return self.__class__.__name__ + '(mean={0}, std={1})'.format(self.mean, self.std)
+ 
+class Augmentations:
+    def __init__(
+            self, 
+            crop_size: int = 32, 
+            crop: bool = True, 
+            flip: bool = True, 
+            rotate: bool = True):
+        self.crop_size = crop_size
+        self.crop = crop
+        self.flip = flip
+        self.rotate = rotate
+
+    def __call__(self, x, y=None):   
+        # Random crop
+        if self.crop and x.shape[-1] > self.crop_size:
+            crop_indices = transforms.RandomCrop.get_params(x, output_size=(self.crop_size, self.crop_size))
+            i, j, h, w = crop_indices
+            x = F.crop(x, i, j, h, w)
+            if y is not None:
+                y = F.crop(y, i, j, h, w)
+
+        # Random horizontal flipping
+        if random.random() > 0.5 and self.flip:
+            x = F.hflip(x)
+            if y is not None:
+                y = F.hflip(y)
+
+        # Random vertical flipping
+        if random.random() > 0.5 and self.flip:
+            x = F.hflip(x)
+            if y is not None:
+                y = F.hflip(y)
+            
+        # Random rotate
+        if random.random() > 0.5 and self.rotate:
+            angles = 0,90,180,270
+            angle = angles[int(random.random()*4)]
+            x = F.rotate(x, angle)
+            if y is not None:
+                y = F.rotate(y, angle)
+
+        return x,y
+
 class LightSheetsDataset(Dataset):
     """TensorDataset with support of transforms."""
     def __init__(self, 
@@ -437,11 +707,24 @@ class LightSheetsDataset(Dataset):
             if self.mode == 'random':
                 index=torch.randint(0,len(y[0])-1,(1,)).item()
                 y = y[:,index]
-            elif self.mode == 'firstlast':
-                y = y[:,-1]
-            elif self.mode == 'ae':
-                y = x
+            elif self.mode.startswith('step'):
+                step = int(self.mode[-2:])
+                y = y[:,step]
+            elif self.mode == 'aedp':
+                y = torch.stack([digital_repr(decrease_intensity(electron_repr(img),0.5)) for img in x])
+            elif self.mode == 'aedpdown':
+                downsize = int(self.mode[-2:])
+                y = torch.stack([downsample(digital_repr(decrease_intensity(electron_repr(img),0.5)),downsize) for img in x])
+            elif self.mode.startswith('aedownup'):
+                downsize = int(self.mode[-2:])
+                y = torch.stack([upsample_clone(downsample(img,downsize)) for img in x])
+#                 y = torch.stack([AddGaussianNoise(img.std())(GaussianBlur((5,5),(2.0,2.0))(upsample_clone(downsample(img,downsize))[None,None])[0,0]) for img in x])
+                if downsize != 2:
+                    x = torch.stack([downsample(img,downsize//2) for img in x])     
             
+                crop_size=32
+                x,y = Augmentations(crop_size=crop_size, crop=True)(x,y)
+        
         if self.transform:
             x = self.transform(x)
             if self.mode == 'full':
@@ -449,25 +732,7 @@ class LightSheetsDataset(Dataset):
                     y[:,i] = self.transform(y[:,i])
             else:
                 y = self.transform(y)
-            
-#         if mode == 'DPSeqDarkening':
-#             for i in range(1,X.shape[1]):
-#                 factor = X[:,i].mean()/X[:,0].mean()
-#                 print(f'Decreasing Intensity Step {i} --> Scaling factor = {factor:.2f}')
-#                 X[:,i] = decrease_intensity(X[:,0].clone(), I_scale.item())
         
-#         if mode == 'DPSeqDiffuse':
-#             N_steps = 1000
-#             ref_img = X[:,0].clone()
-#             X = torch.zeros((X.shape[0],N_steps,X.shape[1],X.shape[2]))
-#             for i in torch.linspace(100, 29000, N_steps):
-#                 factor = int(i)
-#                 print(f'Diffusing Step {i} --> Scaling factor = {factor}')
-#                 X[:,i] = diffusion(X[:,0].clone(), factor)
-
-#         if mode == 'ae':      
-#             Y = X
-#         else:
         x = x.type(torch.FloatTensor)        
         y = y.type(torch.FloatTensor)
 

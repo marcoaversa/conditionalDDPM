@@ -8,6 +8,7 @@ from inspect import isfunction
 from functools import partial
 
 from torch.utils import data
+import torchvision
 from pathlib import Path
 from torch.optim import Adam
 from torchvision import transforms, utils
@@ -422,21 +423,12 @@ class GaussianDiffusion(nn.Module):
         return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
 
     @torch.no_grad()
-    def p_sample_loop(self, Y, shape):
+    def p_sample_loop(self, y, shape):
         b,_,h,w = shape
         img = torch.randn(shape, device=self.device)
 #         for i in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
         for i in reversed(range(0, self.num_timesteps)):
-        
-            prob = i / (self.num_timesteps/(len(Y[:,:])-1))
-            step = int(prob)
-            prob -= step
-            y = (1-prob)*Y[:,:,step]+prob*Y[:,:,step+1]
-            y = Y[:,:,-1]
-    
-            if self.mode == 'c':
-                if len(y.shape) == 1: # Labels 1D
-                    y = self.label_reshaping(y, b, h, w, self.device)   
+            if self.mode == 'c': 
                 img = self.label_concatenate(img,y)
             img = self.p_sample(img, torch.full((b,), i, dtype=torch.long, device=self.device))   
         return img
@@ -478,25 +470,39 @@ class GaussianDiffusion(nn.Module):
         x_noisy = self.q_sample(x_start=x_start[:,:,0], t=t, noise=noise)
         if self.mode == 'c':
             
-            prob = t / (self.num_timesteps/(len(y[:,:])-1))
+            downsample = torch.nn.AvgPool2d(4)
+            upsample = torch.nn.Upsample(scale_factor=4, mode='nearest')
+            blur = torchvision.transforms.GaussianBlur((5,5),(5.,5.))
+            
+            prob = t / (self.num_timesteps/(len(y)-1))
             step = prob.int()
             prob -= step
-            new_y = torch.zeros((b,c,h,w),device=self.device)
+            y_new = torch.zeros((b,c,h,w),device=self.device)
             for i,seq in enumerate(y):
-                new_y[i] = (1-prob[i])*seq[:,step[i]]+prob[i]*seq[:,step[i]+1] 
-            x_noisy = self.label_concatenate(x_noisy, new_y)
-        x_recon = self.denoise_fn(x_noisy, t)
-        
-        return self.loss(noise,x_recon)
+                y_new[i] = (1-prob[i])*seq[:,step[i]]+prob[i]*seq[:,step[i]+1] 
+            x_noisy = self.label_concatenate(x_noisy, y_new)
 
+            prob = (t+1) / ((self.num_timesteps+1)/(len(y)-1))
+            step = prob.int()
+            prob -= step
+            
+            y_blurred = torch.zeros((b,c,h,w),device=self.device)
+            for i,seq in enumerate(y):
+                y_blurred[i] = (1-prob[i])*seq[:,step[i]]+prob[i]*seq[:,step[i]+1] 
+                y_blurred[i] = upsample(blur(downsample(y_blurred[i][None])))[0]
+            
+        x_recon = self.denoise_fn(x_noisy, t)
+        x_pred = upsample(blur(downsample(self.p_sample(x_noisy, t))))
+        
+        loss = self.loss(noise,x_recon) + self.loss(x_pred,y_blurred)
+                                                    
+        return loss
+#         return self.loss(noise,x_recon)
+        
     def forward(self, x, y=None, *args, **kwargs):
         b, c, s, h, w, device, img_size, = *x.shape, x.device, self.image_size
         assert h == img_size and w == img_size, f'height {h} and width {w} of image must be {img_size}'
         t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
-        if self.mode == 'c':
-            assert torch.is_tensor(y) and y.device == device
-            if len(y.shape) == 1: # Labels 1D
-                y = self.label_reshaping(y, b, h, w, device)
         return self.p_losses(x, t, y, *args, **kwargs)
 
 # trainer class
@@ -547,10 +553,10 @@ class LitModelDDPM(pl.LightningModule):
         x, y = self.set_batch(batch)
         n_images_to_sample = 9
         
-        all_images = self.model.sample(y if y == None else y[:9], batch_size=9)  
-        
         y = y if y.ndim == 4 else y[:,:,-1]
         x = x if x.ndim == 4 else x[:,:,0]
+        
+        all_images = self.model.sample(y if y == None else y[:9], batch_size=9)  
         
         metrics_pred = self.model.metrics(all_images, y[:9])
         metrics_target = self.model.metrics(x[:9], y[:9])
