@@ -82,8 +82,6 @@ train_loader, valid_loader = import_dataset(data_name = args.dataset,
 
 x,y = next(iter(train_loader))
 
-print(x.min(),y.min())
-
 if args.dataset.startswith('ls'):
     if args.dataset.endswith('full'):
         _, channels, steps, height, width = x.shape

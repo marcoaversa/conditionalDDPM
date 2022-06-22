@@ -30,6 +30,8 @@ def import_dataset(data_name: str = 'MNIST', batch_size: int = 32, sum_from: int
                    seq_random: bool = True, seq_full: bool = False, force_download: bool = False):
     if data_name == 'MNIST':
         train_loader, valid_loader = import_mnist(batch_size)
+    elif data_name == 'CelebA':
+        train_loader, valid_loader = import_CelebA(batch_size)
     elif data_name == 'CIFAR10':
         train_loader, valid_loader = import_cifar10(batch_size)
     elif data_name == 'speckles':
@@ -76,6 +78,22 @@ def import_mnist_blurred(batch_size: int = 32):
     train_loader, valid_loader = set_dataloaders(train_set, valid_set, batch_size)
     return train_loader, valid_loader
 
+def import_CelebA(batch_size: int = 32):
+    data_name = 'CelebA'
+    data_path = './data'
+    mu = (0.5, 0.5, 0.5)
+    sigma = (0.5, 0.5, 0.5)
+    channels=3
+    
+    dataset_class = getattr(torchvision.datasets, data_name)
+
+    train_transform, test_transform = set_transforms(mu,sigma)
+
+    train_set = dataset_class(data_path, split='train', transform=train_transform, download=False)
+    valid_set = dataset_class(data_path, split='valid', transform=test_transform, download=False)
+    
+    train_loader, valid_loader = set_dataloaders(train_set, valid_set, batch_size)
+    return train_loader, valid_loader
 
 def import_cifar10(batch_size: int = 32):
     data_name = 'CIFAR10'
@@ -89,6 +107,21 @@ def import_cifar10(batch_size: int = 32):
     train_loader, valid_loader = set_dataloaders(train_set, valid_set, batch_size)
     return train_loader, valid_loader
 
+
+def import_from_torchvision(
+            data_name: str = 'MNIST', 
+            data_path: str = './data', 
+            mu: torch.Tensor = torch.Tensor([0.,]),
+            sigma: torch.Tensor = torch.Tensor([1.,])):
+
+    dataset_class = getattr(torchvision.datasets, data_name)
+
+    train_transform, test_transform = set_transforms(mu,sigma)
+
+    train_set = dataset_class(data_path, train = True, transform=train_transform, download=True)
+    valid_set = dataset_class(data_path, train = False, transform=test_transform, download=True)
+
+    return train_set, valid_set
 
 def import_speckles(sum_from: int = 0, sum_to: int = 10, batch_size: int = 32, 
                     import_timeseries = False, sum_every_n_steps = 5):
@@ -288,17 +321,17 @@ def import_ls(mode: str = 'seq', batch_size: int = 32, image_size: int = 128,
 #         return x
     
     mu = 473.93
-    sigma = 50.44
+    sigma = 50.44*5 # normalize to 5 standard deviations
 #     mu = 0.0137
 #     sigma = 0.0048
 
-    def clip(x):
-        return torch.clip(x,-5,5)
+#     def clip(x):
+#         return torch.clip(x,-5,5)
     
-    transform = transforms.Compose([
-                                    transforms.Normalize(mu, sigma),
-                                    clip
-                                    ])
+#     transform = transforms.Compose([
+#                                     transforms.Normalize(mu, sigma),
+# #                                     clip
+#                                     ])
 
     train_set = LightSheetsDataset( (Y[:train_size], X[:train_size]), mode=mode, transform=transform)
     valid_set = LightSheetsDataset( (Y[train_size:], X[train_size:]), mode=mode, transform=transform)
@@ -345,240 +378,6 @@ def decrease_intensity(
 
     return torch.Tensor(imgs)            
 
-def replace_noise(
-                imgs, 
-                factor: float =  1., 
-                B: float = 99.6, 
-                G: float = 2.2, 
-                N: float = 3., 
-                W: float = 2**16-1):
-    
-    assert imgs.ndim == 3, 'Input image should be in the raw pattern format (B,H,W)'
-    if isinstance(imgs, torch.Tensor):
-        imgs = np.array(imgs).astype(np.float64)
-        
-    params = jetraw4ai.Parameters(G,B,N,W)
-    
-    for i, img in enumerate(imgs):
-        im_scaled = jetraw4ai.JetrawImage(img, params)
-        imgs[i] = im_scaled.replace_noise().image_data
-
-    return torch.Tensor(imgs)
-    
-def diffusion(
-        imgs, 
-        factor: float =  1., 
-        B: float = 99.6, 
-        G: float = 2.2, 
-        N: float = 3., 
-        W: float = 2**16-1):
-    
-    
-    assert factor <= 1. or factor >= 0, 'Intensity scale factor should be in the range (0.,29400.]'
-    assert imgs.ndim == 3, 'Input image should be in the raw pattern format (B,H,W)'
-    if isinstance(imgs, torch.Tensor):
-        imgs = np.array(imgs).astype(np.float64)
-    
-    params = jetraw4ai.Parameters(G,B,N,W)
-
-    for i, img in enumerate(imgs):        
-        jetraw_img = jetraw4ai.JetrawImage(img, params)
-        el_repr = jetraw_img.electron_repr()
-        v_max = el_repr.image_data.max()
-        v_max_el = int((W-B)/G)
-        f = int(factor*(v_max_el-v_max))
-        el_repr.image_data += f
-        diffused_img = el_repr.replace_noise().digital_repr().image_data
-        ratio = diffused_img.mean()/img.mean()
-        diffused_img /= ratio
-        imgs[i] = diffused_img
-    return torch.Tensor(imgs)
-
-def image_info(image: Union[np.ndarray, Tensor]):
-    shape = image.shape
-    if len(shape) == 3:
-        if isinstance(image, Tensor):
-            C, H, W = shape
-        elif isinstance(image, np.ndarray):
-            H, W, C = shape
-        else:
-            raise NotImplementedError("Expected torch.Tensor or np.ndarray")
-    elif len(shape) == 2:
-        H, W = shape
-        C = 1
-    else:
-        raise NotImplementedError("Image shape is {shape}. It expected image with shape (H,W), (C,H,W) or (H,W,C)")
-
-    return C, H, W
-
-def image2patches(image: Union[np.ndarray, Tensor], patch_size: list, view_as_patches: bool = False):
-    """
-        Patch a 2D image in tiles.
-
-        Args:
-            image: 
-                Image to patch. Image should be 2D. 
-            patch_size:
-                Final size of the tiles. 
-            view_as_patches:
-                Example for 2D image:
-                    If set true -> return the final output is 4D (N_patch_x, N_patch_y, Patch_size_x, Patch_size_y)
-                        image.shape = (100,100), patch_size = (2,2) -> patches.shape = (50,50,2,2)
-                    If set False -> return the final output is 3D (N_patch, Patch_size_x, Patch_size_y)
-                        image.shape = (100,100), patch_size = (2,2) -> patches.shape = (2500,2,2)
-        Return:
-            patches:
-                Image splitted in patches        
-
-    """
-
-    C, H, W = image_info(image)
-    assert C == 1, "Image needs to be 2D."
-    p0, p1 = patch_size
-
-    x_max = p0*(H//p0) # integer number for patches
-    y_max = p1*(W//p1)
-    
-    image = image[0:x_max, 0:y_max]
-    if view_as_patches:
-        return image.reshape(H//p0,p0,W//p1,p1).swapaxes(1,2).reshape(-1,p0,p1)
-    else:
-        return image.reshape(H//p0,p0,W//p1,p1).swapaxes(1,2)
-
-
-def patches2image(patches):
-    """
-        Return patches obtained from a 2D image into the original image.
-
-        Args:
-            patches: 
-                Tiles to return into the 2D image. Shape = (N_patch_x, N_patch_y, Patch_size_x, Patch_size_y)
-            Return:
-                image:
-                    2D image reconstructed from patches
-
-    """
-    
-    assert len(patches.shape) == 4, "patches2image is compatible with image2patches, input patches should be in the shape (N_patch_x, N_patch_y, Patch_size_x, Patch_size_y)"
-    n_h,n_w,p0,p1 = patches.shape
-    return patches.reshape(n_h, n_w, p0,p1).swapaxes(1,2).reshape(n_h*p0,n_w*p1)
-
-def downsample(image, downsample_size):
-    if image.ndim == 2:
-        image = image[None]
-    assert image.ndim == 3, f'Image shape should be (C,H,W) instead of {image.shape}'
-    patches = image2patches(image, patch_size= [downsample_size,downsample_size], view_as_patches = False)
-    image = patches2image(patches.mean(-1).mean(-1)[None,None])[None]
-    return image[0]
-
-def inv_split_mosaic(imgs: torch.Tensor):
-
-    C, H, W = imgs.shape
-    
-    mosaic = torch.zeros((H*2, W*2))
-    imgs = [imgs[c] for c in range(C)]
-
-    c = 0
-    for i in range(2):
-        for j in range(2):
-            mosaic[i::2, j::2] = imgs[c] 
-            c+=1
-
-    return mosaic
-
-def upsample_clone(image):
-    image = image[None].repeat(4,1,1)
-    image = inv_split_mosaic(image)
-    return image
-
-def upsample_interpolation(img):
-    return interpolate(img[None,None], size=(2,2))[0,0]
-
-# class TVDenoise(torch.nn.Module):
-#     def __init__(self, noisy_image):
-#         super(TVDenoise, self).__init__()
-#         self.l2_term = torch.nn.MSELoss(reduction='mean')
-#         self.regularization_term = kornia.losses.TotalVariation()
-#         # create the variable which will be optimized to produce the noise free image
-#         self.clean_image = torch.nn.Parameter(data=noisy_image.clone(), requires_grad=True)
-#         self.noisy_image = noisy_image
-
-#     def forward(self):
-#         return self.l2_term(self.clean_image, self.noisy_image) + 0.0001 * self.regularization_term(self.clean_image)
-
-#     def get_clean_image(self):
-#         return self.clean_image
-
-# def TVDenoising(image: torch.Tensor):
-#     """Image shape = (B,C,W,H)"""
-    
-#     tv_denoiser = TVDenoise(image)
-#     optimizer = torch.optim.SGD(tv_denoiser.parameters(), lr=0.1, momentum=0.9)
-
-#     # run the optimization loop
-#     num_iters = 500
-#     for i in range(num_iters):
-#         optimizer.zero_grad()
-#         loss = tv_denoiser()
-#         loss.backward()
-#         optimizer.step()
-        
-#     return tv_denoiser.get_clean_image()
-    
-def tile_image(image, image_size):
-    """Image shape (H,W)"""
-    return image.unfold(0,image_size,image_size).unfold(1,image_size,image_size).reshape(-1,image_size,image_size)
-
-
-def tile_multichannel_images(image, image_size):
-    """Image shape (C,H,W)"""
-    c,*_ = image.shape
-    image = image.unfold(1, image_size, image_size) #tile 1st axis
-    image = image.unfold(2, image_size, image_size) #tile 2nd axis 
-    image = image.reshape(c,-1,image_size,image_size) #stack tiles 
-    image = image.permute(1,0,2,3) #reorder with channels on second axis
-    return image
-
-
-def import_from_torchvision(
-            data_name: str = 'MNIST', 
-            data_path: str = './data', 
-            mu: torch.Tensor = torch.Tensor([0.,]),
-            sigma: torch.Tensor = torch.Tensor([1.,])):
-
-    dataset_class = getattr(torchvision.datasets, data_name)
-
-    train_transform, test_transform = set_transforms(mu,sigma)
-
-    train_set = dataset_class(data_path, train = True, transform=train_transform, download=True)
-    valid_set = dataset_class(data_path, train = False, transform=test_transform, download=True)
-
-    return train_set, valid_set
-
-
-def set_transforms(
-            mu: torch.Tensor = torch.Tensor([0.,0.,0.]),
-            sigma: torch.Tensor = torch.Tensor([1.,1.,1.])):
-        
-    train_transform = transforms.Compose([
-            transforms.ToTensor(),
-#             transforms.RandomRotation(90),
-#             transforms.RandomHorizontalFlip(),
-#             transforms.RandomVerticalFlip(),
-            transforms.Normalize(mu, sigma)
-            ]) 
-
-    test_transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mu, sigma)
-            ]) 
-
-    return train_transform, test_transform
-
-def set_dataloaders(train_set, valid_set, batch_size: int = 32):
-    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
-    valid_loader = DataLoader(valid_set, batch_size=batch_size, shuffle=False)
-    return train_loader, valid_loader
 
 class SpeckleDataset(Dataset):
     """TensorDataset with support of transforms."""
@@ -617,22 +416,6 @@ class SpeckleDataset(Dataset):
         elif self.size < h:
             assert self.size < h, 'I haven t implemented yet the downsampling'
             
-electron_repr = lambda x: (x - 99.6)/ 2.2
-digital_repr = lambda x: (x * 2.2 + 99.6)
-
-def decrease_intensity(image_data: torch.Tensor, factor: float):
-    if not 0 <= factor <= 1:
-        raise ValueError("factor must be between 0 and 1")
-
-    image_data = electron_repr(image_data)
-    if factor != 1:
-        scaled_data = factor * image_data
-        noise_var = (1 - factor) * torch.clip(scaled_data, 0, None) + \
-                    (1 - factor ** 2) * (3.0 / 2.2) ** 2
-        scaled_data = digital_repr(scaled_data + torch.normal(0, torch.sqrt(noise_var)))
-        return torch.clip(scaled_data,0,2**16-1)
-    else:
-        return digital_repr(image_data)   
 
 class AddGaussianNoise(object):
     def __init__(self,std):
@@ -644,48 +427,6 @@ class AddGaussianNoise(object):
     def __repr__(self):
         return self.__class__.__name__ + '(mean={0}, std={1})'.format(self.mean, self.std)
  
-class Augmentations:
-    def __init__(
-            self, 
-            crop_size: int = 32, 
-            crop: bool = True, 
-            flip: bool = True, 
-            rotate: bool = True):
-        self.crop_size = crop_size
-        self.crop = crop
-        self.flip = flip
-        self.rotate = rotate
-
-    def __call__(self, x, y=None):   
-        # Random crop
-        if self.crop and x.shape[-1] > self.crop_size:
-            crop_indices = transforms.RandomCrop.get_params(x, output_size=(self.crop_size, self.crop_size))
-            i, j, h, w = crop_indices
-            x = F.crop(x, i, j, h, w)
-            if y is not None:
-                y = F.crop(y, i, j, h, w)
-
-        # Random horizontal flipping
-        if random.random() > 0.5 and self.flip:
-            x = F.hflip(x)
-            if y is not None:
-                y = F.hflip(y)
-
-        # Random vertical flipping
-        if random.random() > 0.5 and self.flip:
-            x = F.hflip(x)
-            if y is not None:
-                y = F.hflip(y)
-            
-        # Random rotate
-        if random.random() > 0.5 and self.rotate:
-            angles = 0,90,180,270
-            angle = angles[int(random.random()*4)]
-            x = F.rotate(x, angle)
-            if y is not None:
-                y = F.rotate(y, angle)
-
-        return x,y
 
 class LightSheetsDataset(Dataset):
     """TensorDataset with support of transforms."""

@@ -417,12 +417,6 @@ class GaussianDiffusion(nn.Module):
         
         to_torch = partial(torch.tensor, dtype=torch.float32, device=self.device)
         
-#         if exists(self.betas):
-#             betas = self.betas.detach().cpu().numpy() if isinstance(self.betas, torch.Tensor) else self.betas
-#         else:
-#             betas = cosine_beta_schedule(self.num_timesteps)
-
-#         betas = cosine_beta_schedule(self.num_timesteps)
         if state == 'train':
             betas = cosine_beta_schedule(self.num_timesteps)
         elif state == 'test':
@@ -441,15 +435,6 @@ class GaussianDiffusion(nn.Module):
         self.log_one_minus_alphas_cumprod = to_torch(np.log(1. - alphas_cumprod))
         self.sqrt_recip_alphas_cumprod = to_torch(np.sqrt(1. / alphas_cumprod))
         self.sqrt_recipm1_alphas_cumprod = to_torch(np.sqrt(1. / alphas_cumprod - 1))
-
-#         if state == 'test':
-#             # Fast sampling
-#             alphas =  alphas[::self.sample_every]
-#             alphas_cumprod = alphas_cumprod[::self.sample_every]
-#             alphas_cumprod_prev = np.append(1., alphas_cumprod[:-1])
-#             betas = betas[::self.sample_every]
-# #             betas = 1. - alphas_cumprod/alphas_cumprod_prev
-# #             self.betas = to_torch(betas)
         
         # calculations for posterior q(x_{t-1} | x_t, x_0)
         posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
@@ -466,7 +451,6 @@ class GaussianDiffusion(nn.Module):
             loss = lambda x,y: (x - y).abs().mean()
         elif self.loss_type == 'l2':
             loss = nn.MSELoss()
-#             F.mse_loss(noise, x_recon)
         else:
             raise NotImplementedError()
         return loss
