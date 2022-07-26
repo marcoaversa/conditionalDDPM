@@ -9,7 +9,8 @@ import torch
 import torchvision
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
-from models.DDPM_LearnSigma import Unet, GaussianDiffusion, LitModelDDPM
+from models.DDPM import Unet, GaussianDiffusion, LitModelDDPM
+# from models.DDPM_LearnSigma import Unet, GaussianDiffusion, LitModelDDPM
 # from models.DDPMseq import Unet, GaussianDiffusion, LitModelDDPM
 # from models.DDPMdp import Unet, GaussianDiffusion, LitModelDDPM
 
@@ -33,14 +34,6 @@ parser.add_argument('--experiment_name', type= str, default='dev', help='experim
 parser.add_argument('--run_name', type=str, default='test', help='run name tracked on mlflow')
 
 # Data & Results 
-# parser.add_argument('--dataset', type=str, default='MNIST', choices=('MNIST',
-#                                                                      'CIFAR10',
-#                                                                      'speckles',
-#                                                                      'ls_random',
-#                                                                      'ls_full',
-#                                                                      'ls_firstlast',
-#                                                                      'ls_ae',
-#                                                                      'ls_aedp',), help='Choose the dataset')
 parser.add_argument('--dataset', type=str, default='MNIST', help='Choose the dataset')
 parser.add_argument('--dataset_path', type=str, default='./data', help='Choose the dataset path')
 parser.add_argument('--image_size', type=int, default=128, help='Decide the size of the cropped images')
@@ -55,6 +48,7 @@ parser.add_argument('--mode', type=str, default='train', choices=('train','test'
 parser.add_argument('--model_type', type=str, default='c', choices=('unc','c'), help='Select model type')
 parser.add_argument('--save_loss_every', type=int, default=50, help='Save loss function every N steps')
 parser.add_argument('--sample_every', type=int, default=1, help='Sample every N steps in the DDPM sampling process')
+# parser.add_argument('--validate_every_n_steps', type=int, default=500, help='Validation run every n steps')
 
 # Train Mode args
 parser.add_argument('--timesteps', type=int, default=1000, help='Select number of timesteps diffusion model')
@@ -109,11 +103,11 @@ diffusion = GaussianDiffusion(
                 model,
                 image_size = image_size,
                 timesteps = args.timesteps,  
-                sample_every = args.sample_every, 
+#                 sample_every = args.sample_every, 
                 loss_type = args.loss,  
                 channels = channels,
                 model_type = args.model_type,
-                clip = args.clip,
+#                 clip = args.clip,
                 device = args.device
                 )
 
@@ -138,6 +132,9 @@ for key in list(args.__dict__.keys()):
     mlf_logger.experiment.log_param(run_id=run_id, key=key, value=getattr(args, key))
 
 """Define Trainer"""
+
+# check_val_every_n_epoch = args.validate_every_n_steps//args.batch_size
+
 trainer = Trainer(
                  enable_checkpointing=False,
                  logger=mlf_logger,
@@ -146,6 +143,7 @@ trainer = Trainer(
                  limit_test_batches=1,
                  log_every_n_steps=50,
                  num_sanity_val_steps=0,
+#                  check_val_every_n_epoch=check_val_every_n_epoch,
                  gpus=1 if args.device == 'cuda:0' else 0)
 
 """Train the model"""

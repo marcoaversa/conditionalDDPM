@@ -23,7 +23,7 @@ from typing import Union
 
 import pyjetraw4ai_proto as jetraw4ai 
 
-from utils.base import set_dataloaders, digital_repr, electron_repr, decrease_intensity, downsample, upsample_clone
+from utils.base import set_dataloaders, digital_repr, electron_repr, decrease_intensity, downsample, upsample_clone,tile_multichannel_images
 
 def import_ls(
         name: str = 'ls_full', 
@@ -117,7 +117,8 @@ def detect_sequence(data_path: str = './data/light_sheets', image_size: int = 12
     energy = [img_ref.mean(),]
     img_ref = norm(img_ref)
 #     img_ref = CenterCrop(400)(img_ref)
-    img_ref = GaussianBlur(5, sigma=(5.0, 5.0))(img_ref)
+#     img_ref = GaussianBlur(5, sigma=(5.0, 5.0))(img_ref)
+    img_ref = GaussianBlur(9, sigma=(2.0, 2.0))(img_ref)
 
     zs,xs,p = [4,],[0,],[1,]
     for pos in range(2,18):
@@ -175,8 +176,9 @@ class LightSheetsDataset(Dataset):
             elif self.mode.startswith('step'):
                 step = int(self.mode[-2:])
                 y = y[:,step]
-            elif self.mode == 'aedp':
-                y = torch.stack([digital_repr(decrease_intensity(electron_repr(img),0.5)) for img in x])
+            elif self.mode.startswith('aedp'):
+                percent = float(self.mode.replace('aedp',''))/100
+                y = torch.stack([digital_repr(decrease_intensity(electron_repr(img),percent)) for img in x])
             elif self.mode.startswith('aedpdown'):
                 downsize = int(self.mode[-2:])
                 y = torch.stack([downsample(digital_repr(decrease_intensity(electron_repr(img),0.5)),downsize) for img in x])

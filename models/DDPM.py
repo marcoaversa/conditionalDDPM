@@ -293,85 +293,6 @@ def cosine_beta_schedule(timesteps, s = 0.008):
     betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
     return np.clip(betas, a_min = 0, a_max = 0.999)
 
-def image_hist2d(image: torch.Tensor, n_bins: int = 256, bandwidth: float = -1.,
-                 centers: torch.Tensor = torch.tensor([]), return_pdf: bool = False):
-    """Function that estimates the histogram of the input image(s).
-
-    The calculation uses triangular kernel density estimation.
-
-    Args:
-        x: Input tensor to compute the histogram with shape
-        :math:`(H, W)`, :math:`(C, H, W)` or :math:`(B, C, H, W)`.
-        min: Lower end of the interval (inclusive).
-        max: Upper end of the interval (inclusive). Ignored when
-        :attr:`centers` is specified.
-        n_bins: The number of histogram bins. Ignored when
-        :attr:`centers` is specified.
-        bandwidth: Smoothing factor. If not specified or equal to -1,
-        bandwidth = (max - min) / n_bins.
-        centers: Centers of the bins with shape :math:`(n_bins,)`.
-        If not specified or empty, it is calculated as centers of
-        equal width bins of [min, max] range.
-        return_pdf: If True, also return probability densities for
-        each bin.
-
-    Returns:
-        Computed histogram of shape :math:`(bins)`, :math:`(C, bins)`,
-        :math:`(B, C, bins)`.
-        Computed probability densities of shape :math:`(bins)`, :math:`(C, bins)`,
-        :math:`(B, C, bins)`, if return_pdf is ``True``. Tensor of zeros with shape
-        of the histogram otherwise.
-    """
-    v_min = image.min().item()
-    v_max = image.max().item()
-    
-    if not isinstance(image, torch.Tensor):
-        raise TypeError(f"Input image type is not a torch.Tensor. Got {type(image)}.")
-
-    if centers is not None and not isinstance(centers, torch.Tensor):
-        raise TypeError(f"Bins' centers type is not a torch.Tensor. Got {type(centers)}.")
-
-    if centers.numel() > 0 and centers.dim() != 1:
-        raise ValueError(f"Bins' centers must be a torch.Tensor "
-                         "of the shape (n_bins,). Got {values.shape}.")
-
-    if not isinstance(n_bins, int):
-        raise TypeError(f"Type of number of bins is not an int. Got {type(n_bins)}.")
-
-    if bandwidth != -1 and not isinstance(bandwidth, float):
-        raise TypeError(f"Bandwidth type is not a float. Got {type(bandwidth)}.")
-
-    if not isinstance(return_pdf, bool):
-        raise TypeError(f"Return_pdf type is not a bool. Got {type(return_pdf)}.")
-        
-    device = image.device
-
-    if image.dim() == 4:
-        batch_size, n_channels, height, width = image.size()
-    elif image.dim() == 3:
-        batch_size = 1
-        n_channels, height, width = image.size()
-    elif image.dim() == 2:
-        height, width = image.size()
-        batch_size, n_channels = 1, 1
-    else:
-        raise ValueError(f"Input values must be a of the shape BxCxHxW, "
-                         f"CxHxW or HxW. Got {image.shape}.")
-
-    if bandwidth == -1.:
-        bandwidth = (v_max - v_min) / n_bins
-    if centers.numel() == 0:
-        centers = v_min + bandwidth * (torch.arange(n_bins, device=device).float() + 0.5)
-    centers = centers.reshape(-1, 1, 1, 1, 1)
-    u = abs(image.unsqueeze(0) - centers) / bandwidth
-    mask = (u <= 1).float()
-    hist = torch.sum(((1 - u) * mask), dim=(-2, -1)).permute(1, 2, 0)
-    if return_pdf:
-        normalization = torch.sum(hist, dim=-1).unsqueeze(0) + 1e-10
-        pdf = hist / normalization
-        return hist, pdf
-    return hist#, torch.zeros_like(hist, dtype=hist.dtype, device=device)
-
 class GaussianDiffusion(nn.Module):
     def __init__(
         self,
@@ -381,10 +302,9 @@ class GaussianDiffusion(nn.Module):
         image_size,
         channels = 3,
         timesteps = 1000,
-        sample_every = 1,
         lam = 0.001,
         loss_type = 'l1',
-        metrics_type = 'PSNR',
+        metrics_type = 'MSE',
         betas = None,
         device='cuda:0'
     ):
@@ -395,30 +315,15 @@ class GaussianDiffusion(nn.Module):
         self.denoise_fn = denoise_fn.to(device)
         self.device=device
 
-        self.sample_every = sample_every
-        self.lam = lam
-        self.bins = 256
         self.num_timesteps = int(timesteps)
         self.loss_type = loss_type
         self.metrics_type = metrics_type
-        self.loss_simple = nn.MSELoss()
-        self.loss_vlb = torch.nn.KLDivLoss()
-        self.histogram = image_hist2d
+        self.loss = self._set_loss()
         self.metrics = self._set_metrics()
 
         self.betas = betas
         
-        self.set_parameters(state='train')
-
-
-    def set_parameters(self,state='train'):
-        
         to_torch = partial(torch.tensor, dtype=torch.float32, device=self.device)
-        
-#         if exists(self.betas):
-#             betas = self.betas.detach().cpu().numpy() if isinstance(self.betas, torch.Tensor) else self.betas
-#         else:
-#             betas = cosine_beta_schedule(self.num_timesteps)
 
         betas = cosine_beta_schedule(self.num_timesteps)
         alphas = 1. - betas
@@ -436,15 +341,6 @@ class GaussianDiffusion(nn.Module):
         self.sqrt_recip_alphas_cumprod = to_torch(np.sqrt(1. / alphas_cumprod))
         self.sqrt_recipm1_alphas_cumprod = to_torch(np.sqrt(1. / alphas_cumprod - 1))
 
-        if state == 'test':
-            # Fast sampling
-            alphas =  alphas[::self.sample_every]
-            alphas_cumprod = alphas_cumprod[::self.sample_every]
-            alphas_cumprod_prev = np.append(1., alphas_cumprod[:-1])
-            betas = betas[::self.sample_every]
-#             betas = 1. - alphas_cumprod/alphas_cumprod_prev
-#             self.betas = to_torch(betas)
-        
         # calculations for posterior q(x_{t-1} | x_t, x_0)
         posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
         # above: equal to 1. / (1. / (1. - alpha_cumprod_tm1) + alpha_t / beta_t)
@@ -460,7 +356,6 @@ class GaussianDiffusion(nn.Module):
             loss = lambda x,y: (x - y).abs().mean()
         elif self.loss_type == 'l2':
             loss = nn.MSELoss()
-#             F.mse_loss(noise, x_recon)
         else:
             raise NotImplementedError()
         return loss
@@ -468,21 +363,14 @@ class GaussianDiffusion(nn.Module):
     def _set_metrics(self):
         if self.metrics_type == 'PSNR':
             metrics = lambda x,y: 20*torch.log10(x.max()) - 10*torch.log10(((x-y)**2).mean())
-            
+        if self.metrics_type == 'MSE':
+            metrics = lambda x,y: F.mse_loss(x,y)
+        else:
+            raise NotImplementedError()
         return metrics
-    
-    def to_histo(self, t):
-        assert t.ndim == 4, f'Shape should be (B,C,H,W) instead of tensor.shape'
-        return self.histogram(t,n_bins=self.bins)#.reshape(-1,self.bins)
 
     def set_min_log(self,t):
         return torch.maximum(t,torch.ones_like((t))*1e-20).to(self.device)   
-
-    def split_diffusion_output(self,t):
-        assert t.ndim == 4, f'Shape should be (B,C,H,W) instead of tensor.shape'
-        _,channels,*_ = t.shape
-        assert channels%2 == 0, 'Output channels should be even'
-        return t[:,:channels//2], t[:,channels//2:]
 
     def label_reshaping(self, y, b, h, w, device):
         # y = torch.tensor(y)
@@ -535,16 +423,14 @@ class GaussianDiffusion(nn.Module):
 
     @torch.no_grad()
     def p_sample_loop(self, y, shape):
-        self.set_parameters(state='test')
         b,_,h,w = shape
         img = torch.randn(shape, device=self.device)
-        for i in reversed(range(0, self.num_timesteps//self.sample_every)):
+        for i in reversed(range(0, self.num_timesteps)):
             if self.mode == 'c':
                 if len(y.shape) == 1: # Labels 1D
                     y = self.label_reshaping(y, b, h, w, self.device)   
                 img = self.label_concatenate(img,y)
             img = self.p_sample(img, torch.full((b,), i, dtype=torch.long, device=self.device))   
-        self.set_parameters(state='train')
         return img
 
     @torch.no_grad()
@@ -552,22 +438,6 @@ class GaussianDiffusion(nn.Module):
         image_size = self.image_size
         channels = self.channels
         return self.p_sample_loop(y, (batch_size, channels, image_size, image_size))
-
-    @torch.no_grad()
-    def interpolate(self, x1, x2, t = None, lam = 0.5):
-        b, *_, device = *x1.shape, x1.device
-        t = default(t, self.num_timesteps - 1)
-
-        assert x1.shape == x2.shape
-
-        t_batched = torch.stack([torch.tensor(t, device=device)] * b)
-        xt1, xt2 = map(lambda x: self.q_sample(x, t=t_batched), (x1, x2))
-
-        img = (1 - lam) * xt1 + lam * xt2
-        for i in tqdm(reversed(range(0, t)), desc='interpolation sample time step', total=t):
-            img = self.p_sample(img, torch.full((b,), i, device=device, dtype=torch.long))
-
-        return img
 
     def q_sample(self, x_start, t, noise=None):
         noise = default(noise, lambda: torch.randn_like(x_start)).to(x_start.device)
@@ -586,7 +456,7 @@ class GaussianDiffusion(nn.Module):
             x_noisy = self.label_concatenate(x_noisy, y)
         x_recon = self.denoise_fn(x_noisy, t)
         
-        return self.loss_simple(noise,x_recon)
+        return self.loss(noise,x_recon)
 
     def forward(self, x, y=None, *args, **kwargs):
         b, c, h, w, device, img_size, = *x.shape, x.device, self.image_size
@@ -637,16 +507,48 @@ class LitModelDDPM(pl.LightningModule):
                                               value = loss.item(),
                                               step = self.global_step)
             
-            if loss < self.lower_loss:
-                torch.save(self.model.denoise_fn.state_dict(), f'/nfs/conditionalDDPM/tmp/model_{self.global_step}.pt')
-                torch.save(self.model.denoise_fn.state_dict(), f'/nfs/conditionalDDPM/tmp/model_best.pt')
-                self.logger.experiment.log_artifact(run_id = self.logger.run_id,
-                                                            local_path=f'/nfs/conditionalDDPM/tmp/model_best.pt', 
-                                                            artifact_path=None)
-                self.lower_loss = loss
+#             if loss < self.lower_loss:
+            torch.save(self.model.denoise_fn.state_dict(), f'/nfs/conditionalDDPM/tmp/model_{self.global_step}.pt')
+            torch.save(self.model.denoise_fn.state_dict(), f'/nfs/conditionalDDPM/tmp/model_best.pt')
+            self.logger.experiment.log_artifact(run_id = self.logger.run_id,
+                                                        local_path=f'/nfs/conditionalDDPM/tmp/model_best.pt', 
+                                                        artifact_path=None)
+#             self.lower_loss = loss
                     
         return loss
     
+    @torch.no_grad()
+    def validation_step(self, batch, batch_nb):
+        x, y = self.set_batch(batch)
+        test_batch = 4
+        n_row = int(test_batch**0.5)
+
+        all_images = self.model.sample(y if y == None else y[:test_batch], batch_size=test_batch)  
+        self.save_with_2Dlabels(all_images, mode=f'valid-{self.global_step:06d}', var_type='pred', n_row=n_row)
+        
+        if self.model_type == 'c':
+            if y.ndim > 1:
+                metrics_pred = self.model.metrics(all_images, y[:test_batch])
+                metrics_target = self.model.metrics(x[:test_batch], y[:test_batch])
+
+                self.logger.experiment.log_metric(run_id = self.logger.run_id,
+                                                  key = self.model.metrics_type+'-pred', 
+                                                  value = metrics_pred.item(),
+                                                  step = self.global_step)
+
+                self.logger.experiment.log_metric(run_id = self.logger.run_id,
+                                                  key = self.model.metrics_type+'-target', 
+                                                  value = metrics_target.item(),
+                                                  step = self.global_step)
+                
+                self.save_with_2Dlabels(x, mode=f'valid-{self.global_step:06d}', var_type='target', n_row=n_row)
+                self.save_with_2Dlabels(y if y.shape[1]!= 2 else y[:,0][:,None], 
+                                        mode=f'valid-{self.global_step:06d}', var_type='input', n_row=n_row)
+
+            elif y.ndim == 1:
+                self.save_with_1Dlabels(y, mode=f'valid-{self.global_step:06d}', n_row=n_row) 
+                os.remove(f'/nfs/conditionalDDPM/tmp/labels-test.txt')
+
     @torch.no_grad()
     def test_step(self, batch, batch_nb):
         x, y = self.set_batch(batch)
@@ -654,30 +556,30 @@ class LitModelDDPM(pl.LightningModule):
         n_row = int(test_batch**0.5)
 
         all_images = self.model.sample(y if y == None else y[:test_batch], batch_size=test_batch)  
-        if y.ndim > 1:
-            metrics_pred = self.model.metrics(all_images, y[:test_batch])
-            metrics_target = self.model.metrics(x[:test_batch], y[:test_batch])
-
-            self.logger.experiment.log_metric(run_id = self.logger.run_id,
-                                              key = self.model.metrics_type+'-pred', 
-                                              value = metrics_pred.item(),
-                                              step = self.global_step)
-
-            self.logger.experiment.log_metric(run_id = self.logger.run_id,
-                                              key = self.model.metrics_type+'-target', 
-                                              value = metrics_target.item(),
-                                              step = self.global_step)
-
         self.save_with_2Dlabels(all_images, mode='test', var_type='pred', n_row=n_row)
-
+        
         if self.model_type == 'c':
-            if y.ndim == 1:
-                self.save_with_1Dlabels(y, mode='test', n_row=n_row) 
-                os.remove(f'/nfs/conditionalDDPM/tmp/labels-test.txt')
-            else:
+            if y.ndim > 1:
+                metrics_pred = self.model.metrics(all_images, y[:test_batch])
+                metrics_target = self.model.metrics(x[:test_batch], y[:test_batch])
+
+                self.logger.experiment.log_metric(run_id = self.logger.run_id,
+                                                  key = self.model.metrics_type+'-pred', 
+                                                  value = metrics_pred.item(),
+                                                  step = self.global_step)
+
+                self.logger.experiment.log_metric(run_id = self.logger.run_id,
+                                                  key = self.model.metrics_type+'-target', 
+                                                  value = metrics_target.item(),
+                                                  step = self.global_step)
+                
                 self.save_with_2Dlabels(x, mode='test', var_type='target', n_row=n_row)
                 self.save_with_2Dlabels(y if y.shape[1]!= 2 else y[:,0][:,None], 
                                         mode='test', var_type='input', n_row=n_row)
+
+            elif y.ndim == 1:
+                self.save_with_1Dlabels(y, mode='test', n_row=n_row) 
+                os.remove(f'/nfs/conditionalDDPM/tmp/labels-test.txt')
                 
 #         torch.save(self.model.state_dict(), f'/nfs/conditionalDDPM/tmp/model.pt')
 #         self.logger.experiment.log_artifact(run_id = self.logger.run_id,

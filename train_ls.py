@@ -22,6 +22,8 @@ import mlflow
 from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import MLFlowLogger
 
+from utils.augmentation import ComposeState
+
 os.umask(0o002)
 
 parser = argparse.ArgumentParser(description='ConditionalDDPM')
@@ -76,12 +78,21 @@ mlflow.set_experiment(args.experiment_name)
 
 # Define Dataset
 
-transform = transforms.Lambda(lambda x: (x/10852.0))
+BG=99.6
+mu=388.85
+sigma=53.15
+
+transform = ComposeState([
+    transforms.RandomCrop(128),
+#     transforms.Lambda(lambda x: (x/10852.0)),
+    transforms.Lambda(lambda x: (x-BG-mu)/sigma),
+#     transforms.GaussianBlur(3, sigma=(0.1, 2.0))
+    ])
 
 train_loader, valid_loader = import_ls(
                                         name=args.dataset, 
-                                        batch_size=32, 
-                                        image_size = 256,
+                                        batch_size=args.batch_size, 
+                                        image_size = args.image_size,
                                         transform=transform,
                                         force_download = False)
 x,y = next(iter(train_loader))

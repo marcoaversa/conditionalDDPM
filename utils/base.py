@@ -1,5 +1,6 @@
 import os
 from xmlrpc.client import Boolean
+from pathlib import Path
 
 from PIL import Image
 import tifffile as tiff
@@ -176,7 +177,17 @@ def check_image_folder_consistency(images, masks):
             f"image file {mask_file} file type mismatch. Should be: {file_type_masks}"
 
 
-def show_fig(images: Union[list, np.ndarray, torch.Tensor], title = None, ax_titles: list = (None,), colorbar = False, norm = True, figsize = (10,5)):
+def show_fig(
+    images: Union[list, np.ndarray, torch.Tensor], 
+    title = None, 
+    ax_titles: list = (None,), 
+    colorbar = False, 
+    norm = True, 
+    vmin=None,
+    vmax=None,
+    grid=True,
+    figsize = (10,5),
+    fname= None):
 
 
         if not isinstance(images, list):
@@ -184,7 +195,8 @@ def show_fig(images: Union[list, np.ndarray, torch.Tensor], title = None, ax_tit
             if norm:
                 images = (images-images.min())/(images.max()-images.min())
             plt.figure()
-            plt.imshow(images)
+            plt.imshow(images, vmin=vmin, vmax=vmax)
+            plt.axis('off' if grid == False else 'on')
             if colorbar==True:
                 plt.colorbar()
         else:    
@@ -206,28 +218,37 @@ def show_fig(images: Union[list, np.ndarray, torch.Tensor], title = None, ax_tit
             if len(ax_shape) == 2:
                 for i in range(ax_shape[0]):
                     for j in range(ax_shape[1]):
-                        images[(4*i)+j] = images[(4*i)+j].cpu() if isinstance(images[(4*i)+j], torch.Tensor) else images[(4*i)+j]
-                        im = axes[i,j].imshow(images[(4*i)+j])
+                        images[(4*i)+j] = images[(4*i)+j].cpu() if isinstance(images[(4*i)+j], torch.Tensor) else images[(4*i)+j]      
+                        im = axes[i,j].imshow(images[(4*i)+j],vmin=vmin,vmax=vmax)
                         if ax_titles[0] is not None:
                             axes[i,j].set_title(ax_titles[4*i+j])
                         if colorbar:
                             divider = make_axes_locatable(axes[i,j])
                             cax = divider.append_axes('right', size='5%', pad=0.05)
                             fig.colorbar(im, cax=cax, orientation='vertical')
+                        axes[i,j].axis('off' if grid == False else 'on')
             else:
                 for i in range(ax_shape[0]):
                     images[i] = images[i].cpu() if isinstance(images[i], torch.Tensor) else images[i]
-                    im = axes[i].imshow(images[i])
+                        
+                    im = axes[i].imshow(images[i], vmin=vmin, vmax=vmax)
                     if ax_titles[0] is not None:
                         axes[i].set_title(ax_titles[i])
                     if colorbar:
                         divider = make_axes_locatable(axes[i])
                         cax = divider.append_axes('right', size='5%', pad=0.05)
                         fig.colorbar(im, cax=cax, orientation='vertical')
+                    axes[i].axis('off' if grid == False else 'on')
 
         if title is not None:
             plt.title(title)
         
+        
+        if fname is not None:
+            dir_name = Path(fname).parent
+            if not Path(dir_name).exists():
+                os.makedirs(dir_name)
+            plt.savefig(fname)
         plt.show()
 
 

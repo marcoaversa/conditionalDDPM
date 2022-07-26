@@ -93,7 +93,7 @@ class Upsample(nn.Module):
     def __init__(self, dim):
         super().__init__()
         self.conv = nn.ConvTranspose2d(dim, dim, 4, 2, 1)
-
+        
     def forward(self, x):
         return self.conv(x)
 
@@ -239,6 +239,7 @@ class Unet(nn.Module):
             ]))
 
         out_dim = default(out_dim, channels)*2
+        
         self.final_conv = nn.Sequential(
             Block(dim, dim),
             nn.Conv2d(dim, out_dim, 1)
@@ -266,7 +267,7 @@ class Unet(nn.Module):
             x = resnet2(x, t)
             x = attn(x)
             x = upsample(x)
-
+            
         return self.final_conv(x)
 
 # gaussian diffusion trainer class
@@ -658,29 +659,27 @@ class LitModelDDPM(pl.LightningModule):
         n_row = int(test_batch**0.5)
 
         all_images = self.model.sample(y if y == None else y[:test_batch], batch_size=test_batch)  
-        if y.ndim > 1:
-            metrics_pred = self.model.metrics(all_images, y[:test_batch])
-            metrics_target = self.model.metrics(x[:test_batch], y[:test_batch])
-
-            self.logger.experiment.log_metric(run_id = self.logger.run_id,
-                                              key = self.model.metrics_type+'-pred', 
-                                              value = metrics_pred.item(),
-                                              step = self.global_step)
-
-            self.logger.experiment.log_metric(run_id = self.logger.run_id,
-                                              key = self.model.metrics_type+'-target', 
-                                              value = metrics_target.item(),
-                                              step = self.global_step)
-
         self.save_with_2Dlabels(all_images, mode='test', var_type='pred', n_row=n_row)
-
+        
         if self.model_type == 'c':
-            if y.ndim == 1:
-                self.save_with_1Dlabels(y, mode='test') 
-            else:
+            if y.ndim > 1:
+                metrics_pred = self.model.metrics(all_images, y[:test_batch])
+                metrics_target = self.model.metrics(x[:test_batch], y[:test_batch])
+
+                self.logger.experiment.log_metric(run_id = self.logger.run_id,
+                                                  key = self.model.metrics_type+'-pred', 
+                                                  value = metrics_pred.item(),
+                                                  step = self.global_step)
+
+                self.logger.experiment.log_metric(run_id = self.logger.run_id,
+                                                  key = self.model.metrics_type+'-target', 
+                                                  value = metrics_target.item(),
+                                                  step = self.global_step)
                 self.save_with_2Dlabels(x, mode='test', var_type='target', n_row=n_row)
                 self.save_with_2Dlabels(y if y.shape[1]!= 2 else y[:,0][:,None], 
                                         mode='test', var_type='input', n_row=n_row)
+            elif y.ndim == 1:
+                self.save_with_1Dlabels(y, mode='test') 
                 
 #         torch.save(self.model.state_dict(), f'/nfs/conditionalDDPM/tmp/model.pt')
 #         self.logger.experiment.log_artifact(run_id = self.logger.run_id,
